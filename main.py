@@ -96,13 +96,15 @@ async def process_and_send_message(message):
 
     # Process Media (Photos, Videos, Documents)
     elif message.media:
-        new_caption = clean_and_brand_text(message.caption.html) if message.caption else clean_and_brand_text(" ")
+        # If it's part of an album, grab the caption if available, or fallback
+        caption_source = message.caption.html if message.caption else ""
+        new_caption = clean_and_brand_text(caption_source) if caption_source else clean_and_brand_text(" ")
         
         print(f"Downloading media for message {message.id}...")
-        file_path = await message.download()
-        
-        print(f"Uploading media via Bot...")
         try:
+            file_path = await message.download()
+            print(f"Uploading media via Bot...")
+            
             if message.photo:
                 await bot_app.send_photo(DESTINATION_CHAT_ID, photo=file_path, caption=new_caption, parse_mode=enums.ParseMode.HTML)
             elif message.video:
@@ -111,12 +113,14 @@ async def process_and_send_message(message):
                 await bot_app.send_document(DESTINATION_CHAT_ID, document=file_path, caption=new_caption, parse_mode=enums.ParseMode.HTML)
             else:
                 await bot_app.send_document(DESTINATION_CHAT_ID, document=file_path)
+        except Exception as e:
+            print(f"Error processing media message {message.id}: {e}")
         finally:
-            # Delete local file to free up Railway space
-            if os.path.exists(file_path):
+            # Clean up local file safely
+            if 'file_path' in locals() and file_path and os.path.exists(file_path):
                 os.remove(file_path)
                 
-        print(f"Bot sent media from {message.chat.id}")
+        print(f"Bot processed media from {message.chat.id}")
 
 # ==========================================
 # 8. LIVE MESSAGE EVENT HANDLER
@@ -125,9 +129,14 @@ async def process_and_send_message(message):
 async def monitor_and_forward(client, message):
     # Filter group messages down to only the Target Bot
     if message.chat.id == SOURCE_GROUP_ID:
+        # Check standard user ID, or fallback to check if sender's name/text contains bot reference if needed
         if not message.from_user or message.from_user.id != TARGET_BOT_ID:
             return  
     
+    # Small buffer delay to allow multi-photo albums to compile completely
+    if message.media_group_id:
+        await asyncio.sleep(1.0)
+        
     await process_and_send_message(message)
 
 # ==========================================
@@ -138,9 +147,7 @@ async def main():
     await bot_app.start()
     print("Both Userbot and Target Bot are running!")
     
-    # ----------------------------------------
-    # STEP 1: USERBOT SCANS MEMORY
-    # ----------------------------------------
+    # Step 1: Userbot Scans Memory
     print("Step 1: Userbot is scanning recent chats to rebuild its own cache...")
     try:
         async for dialog in user_app.get_dialogs(limit=100):
@@ -148,9 +155,7 @@ async def main():
     except Exception as e:
         print(f"Userbot dialog scan note: {e}")
 
-    # ----------------------------------------
-    # STEP 2: THE GHOST PING TRICK
-    # ----------------------------------------
+    # Step 2: Ghost Ping Trick
     print("Step 2: Executing the ghost ping to sync the Destination Chat for the Bot...")
     try:
         ping_msg = await user_app.send_message(DESTINATION_CHAT_ID, "🔄 [System] Syncing bot cache...")
@@ -160,26 +165,22 @@ async def main():
     except Exception as e:
         print(f"⚠️ Ghost ping failed: {e}")
 
-    # ----------------------------------------
-    # STEP 3: FETCH THE LAST MESSAGE
-    # ----------------------------------------
+    # Step 3: Fetch Last Message
     print("Step 3: Fetching the LAST message sent by the target bot...")
     try:
         last_message_found = False
-        # Look through the last 50 messages in the group
         async for msg in user_app.get_chat_history(SOURCE_GROUP_ID, limit=50):
             if msg.from_user and msg.from_user.id == TARGET_BOT_ID:
                 print(f"Found the most recent bot message (ID: {msg.id})! Forwarding it now...")
                 await process_and_send_message(msg)
                 last_message_found = True
-                break # Stop searching once we find the first one
+                break 
                 
         if not last_message_found:
             print("No recent messages found from the bot in the group history.")
     except Exception as e:
         print(f"Could not fetch last message: {e}")
 
-    # Keep script running continuously
     print("Live monitoring is now active...")
     await idle()
     await user_app.stop()
