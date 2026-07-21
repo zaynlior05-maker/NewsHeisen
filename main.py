@@ -137,26 +137,31 @@ async def main():
     print("Both Userbot and Target Bot are running!")
     
     # ----------------------------------------
-    # THE GHOST PING TRICK
+    # STEP 1: USERBOT SCANS MEMORY
     # ----------------------------------------
-    print("Rebuilding cache: Executing the ghost ping to sync the Destination Chat...")
+    print("Step 1: Userbot is scanning recent chats to rebuild its own cache...")
     try:
-        # Userbot sends a ghost message to the destination group
+        async for dialog in user_app.get_dialogs(limit=100):
+            pass
+    except Exception as e:
+        print(f"Userbot dialog scan note: {e}")
+
+    # ----------------------------------------
+    # STEP 2: THE GHOST PING TRICK
+    # ----------------------------------------
+    print("Step 2: Executing the ghost ping to sync the Destination Chat for the Bot...")
+    try:
         ping_msg = await user_app.send_message(DESTINATION_CHAT_ID, "🔄 [System] Syncing bot cache...")
-        
-        # Pause for 3 seconds so the Telegram servers push the update to the Bot account
         await asyncio.sleep(3) 
-        
-        # Delete the message instantly so the group stays clean
         await ping_msg.delete()
         print("Cache sync complete! The Bot has successfully resolved the Destination Chat.")
     except Exception as e:
-        print(f"⚠️ Cache sync failed. Make sure your personal USER ACCOUNT is in the destination group! Error: {e}")
+        print(f"⚠️ Ghost ping failed: {e}")
 
     # ----------------------------------------
-    # FETCH THE LAST MESSAGE
+    # STEP 3: FETCH THE LAST MESSAGE
     # ----------------------------------------
-    print("Fetching the LAST message sent by the target bot...")
+    print("Step 3: Fetching the LAST message sent by the target bot...")
     try:
         last_message_found = False
         # Look through the last 50 messages in the group
