@@ -129,29 +129,33 @@ async def monitor_and_forward(client, message):
     await process_and_send_message(message)
 
 # ==========================================
-# 9. STARTUP & FETCH LAST MESSAGE
+# 9. STARTUP, CACHE WARMUP & FETCH LAST MESSAGE
 # ==========================================
 async def main():
     await user_app.start()
     await bot_app.start()
     print("Both Userbot and Target Bot are running!")
     
-    # Cache Warmup
-    print("Rebuilding group cache to fix Peer ID errors... Please wait.")
+    # ----------------------------------------
+    # THE GHOST PING TRICK
+    # ----------------------------------------
+    print("Rebuilding cache: Executing the ghost ping to sync the Destination Chat...")
     try:
-        async for dialog in user_app.get_dialogs(limit=200):
-            pass
-    except Exception as e:
-        print(f"Userbot cache note: {e}")
+        # Userbot sends a ghost message to the destination group
+        ping_msg = await user_app.send_message(DESTINATION_CHAT_ID, "🔄 [System] Syncing bot cache...")
         
-    try:
-        await bot_app.get_chat(DESTINATION_CHAT_ID)
+        # Pause for 3 seconds so the Telegram servers push the update to the Bot account
+        await asyncio.sleep(3) 
+        
+        # Delete the message instantly so the group stays clean
+        await ping_msg.delete()
+        print("Cache sync complete! The Bot has successfully resolved the Destination Chat.")
     except Exception as e:
-        print(f"Bot cache note: {e}")
+        print(f"⚠️ Cache sync failed. Make sure your personal USER ACCOUNT is in the destination group! Error: {e}")
 
-    print("Cache successfully rebuilt! Ready to mirror messages.")
-    
-    # NEW: Fetch the last message on startup
+    # ----------------------------------------
+    # FETCH THE LAST MESSAGE
+    # ----------------------------------------
     print("Fetching the LAST message sent by the target bot...")
     try:
         last_message_found = False
@@ -169,6 +173,7 @@ async def main():
         print(f"Could not fetch last message: {e}")
 
     # Keep script running continuously
+    print("Live monitoring is now active...")
     await idle()
     await user_app.stop()
     await bot_app.stop()
