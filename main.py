@@ -51,7 +51,7 @@ def is_excluded(text: str) -> bool:
     return any(phrase.lower() in text_lower for phrase in EXCLUDED_PHRASES)
 
 def clean_and_brand_text(text_html: str) -> str:
-    """Removes all @usernames/links and appends your own."""
+    """Removes all @usernames/links and appends your clean signature format."""
     if not text_html:
         return ""
     
@@ -60,13 +60,15 @@ def clean_and_brand_text(text_html: str) -> str:
     cleaned = re.sub(r'\B@[\w_]+', '', cleaned)
     cleaned = re.sub(r' +', ' ', cleaned).strip()
     
-    # Append your branding
+    # Append your clean branding format: @channel / @admin
     if MY_CHANNEL or MY_ADMIN:
-        signature = "\n\n"
+        signature_parts = []
         if MY_CHANNEL:
-            signature += f"📢 **Channel:** {MY_CHANNEL}\n"
+            signature_parts.append(MY_CHANNEL)
         if MY_ADMIN:
-            signature += f"👨‍💻 **Admin:** {MY_ADMIN}"
+            signature_parts.append(MY_ADMIN)
+            
+        signature = "\n\n" + " / ".join(signature_parts)
         cleaned += signature
         
     return cleaned
