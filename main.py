@@ -96,31 +96,42 @@ async def process_and_send_message(message):
 
     # Process Media (Photos, Videos, Documents)
     elif message.media:
-        # If it's part of an album, grab the caption if available, or fallback
         caption_source = message.caption.html if message.caption else ""
         new_caption = clean_and_brand_text(caption_source) if caption_source else clean_and_brand_text(" ")
         
-        print(f"Downloading media for message {message.id}...")
+        print(f"Downloading media for message {message.id} to RAM...")
         try:
-            file_path = await message.download()
+            # NEW: Download directly into RAM (in_memory=True) to bypass Railway disk freezes
+            file_data = await message.download(in_memory=True)
+            
+            # Telegram API requires a dummy filename to understand the bytes
+            if message.photo:
+                file_data.name = "image.jpg"
+            elif message.video:
+                file_data.name = "video.mp4"
+            else:
+                file_data.name = "document.file"
+
             print(f"Uploading media via Bot...")
             
-            if message.photo:
-                await bot_app.send_photo(DESTINATION_CHAT_ID, photo=file_path, caption=new_caption, parse_mode=enums.ParseMode.HTML)
-            elif message.video:
-                await bot_app.send_video(DESTINATION_CHAT_ID, video=file_path, caption=new_caption, parse_mode=enums.ParseMode.HTML)
-            elif message.document:
-                await bot_app.send_document(DESTINATION_CHAT_ID, document=file_path, caption=new_caption, parse_mode=enums.ParseMode.HTML)
-            else:
-                await bot_app.send_document(DESTINATION_CHAT_ID, document=file_path)
+            async def execute_upload():
+                if message.photo:
+                    await bot_app.send_photo(DESTINATION_CHAT_ID, photo=file_data, caption=new_caption, parse_mode=enums.ParseMode.HTML)
+                elif message.video:
+                    await bot_app.send_video(DESTINATION_CHAT_ID, video=file_data, caption=new_caption, parse_mode=enums.ParseMode.HTML)
+                elif message.document:
+                    await bot_app.send_document(DESTINATION_CHAT_ID, document=file_data, caption=new_caption, parse_mode=enums.ParseMode.HTML)
+                else:
+                    await bot_app.send_document(DESTINATION_CHAT_ID, document=file_data)
+
+            # Timeout safeguard remains just in case Telegram servers are slow
+            await asyncio.wait_for(execute_upload(), timeout=45.0)
+            print(f"Bot successfully processed media from {message.chat.id}")
+            
+        except asyncio.TimeoutError:
+            print(f"⚠️ TIMEOUT ERROR: The upload for message {message.id} took too long. Skipping.")
         except Exception as e:
             print(f"Error processing media message {message.id}: {e}")
-        finally:
-            # Clean up local file safely
-            if 'file_path' in locals() and file_path and os.path.exists(file_path):
-                os.remove(file_path)
-                
-        print(f"Bot processed media from {message.chat.id}")
 
 # ==========================================
 # 8. LIVE MESSAGE EVENT HANDLER
@@ -129,11 +140,10 @@ async def process_and_send_message(message):
 async def monitor_and_forward(client, message):
     # Filter group messages down to only the Target Bot
     if message.chat.id == SOURCE_GROUP_ID:
-        # Check standard user ID, or fallback to check if sender's name/text contains bot reference if needed
         if not message.from_user or message.from_user.id != TARGET_BOT_ID:
             return  
     
-    # Small buffer delay to allow multi-photo albums to compile completely
+    # Buffer delay to help organize multi-photo albums
     if message.media_group_id:
         await asyncio.sleep(1.0)
         
