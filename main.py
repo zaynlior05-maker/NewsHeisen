@@ -3,34 +3,48 @@ import re
 import asyncio
 from pyrogram import Client, filters, enums, idle
 
-# 1. Fetch credentials from Railway Variables
+# ==========================================
+# 1. CREDENTIALS & TOKENS
+# ==========================================
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 SESSION_STRING = os.environ["SESSION_STRING"] 
 MY_BOT_TOKEN = os.environ["MY_BOT_TOKEN"]
 
-# 2. Fetch Chat IDs from Railway Variables
+# ==========================================
+# 2. CHAT IDs
+# ==========================================
 SOURCE_CHANNEL_ID = int(os.environ["SOURCE_CHANNEL_ID"])
 SOURCE_GROUP_ID = int(os.environ["SOURCE_GROUP_ID"])
 DESTINATION_CHAT_ID = int(os.environ["DESTINATION_CHAT_ID"])
 TARGET_BOT_ID = int(os.environ["TARGET_BOT_ID"])
 
-# 3. Your specific Usernames (Add these to Railway)
+# ==========================================
+# 3. BRANDING (Loaded from Railway)
+# ==========================================
 MY_CHANNEL = os.environ.get("MY_CHANNEL", "")
 MY_ADMIN = os.environ.get("MY_ADMIN", "")
 
-# 4. List of phrases to automatically ignore
+# ==========================================
+# 4. EXCLUDED PHRASES
+# ==========================================
 EXCLUDED_PHRASES = [
     "( PAID AD )",
     "The giveaway has officially ended.",
     "Giveaway Entries"
 ]
 
-# Initialize BOTH Clients
+# ==========================================
+# 5. INITIALIZE CLIENTS
+# ==========================================
 user_app = Client("user_account", session_string=SESSION_STRING, api_id=API_ID, api_hash=API_HASH)
 bot_app = Client("my_bot", bot_token=MY_BOT_TOKEN, api_id=API_ID, api_hash=API_HASH)
 
+# ==========================================
+# 6. HELPER FUNCTIONS
+# ==========================================
 def is_excluded(text: str) -> bool:
+    """Checks if the text contains any forbidden phrases (case-insensitive)."""
     if not text:
         return False
     text_lower = text.lower()
@@ -61,6 +75,9 @@ def clean_and_brand_text(text_html: str) -> str:
         
     return cleaned
 
+# ==========================================
+# 7. MESSAGE EVENT HANDLER
+# ==========================================
 @user_app.on_message(filters.chat([SOURCE_CHANNEL_ID, SOURCE_GROUP_ID]))
 async def monitor_and_forward(client, message):
     
@@ -109,11 +126,32 @@ async def monitor_and_forward(client, message):
                 
         print(f"Bot sent media from {message.chat.id}")
 
-# Run both clients simultaneously
+# ==========================================
+# 8. STARTUP & CACHE WARMUP
+# ==========================================
 async def main():
     await user_app.start()
     await bot_app.start()
     print("Both Userbot and Target Bot are running!")
+    
+    print("Rebuilding group cache to fix Peer ID errors... Please wait.")
+    
+    # Force the userbot to scan recent chats and cache their hidden access hashes
+    try:
+        async for dialog in user_app.get_dialogs(limit=200):
+            pass
+    except Exception as e:
+        print(f"Userbot cache note: {e}")
+        
+    # Force the bot to scan its chats
+    try:
+        async for dialog in bot_app.get_dialogs(limit=50):
+            pass
+    except Exception as e:
+        print(f"Bot cache note: {e}")
+
+    print("Cache successfully rebuilt! Ready to mirror messages.")
+    
     await idle()
     await user_app.stop()
     await bot_app.stop()
