@@ -136,17 +136,16 @@ async def main():
     
     print("Rebuilding group cache to fix Peer ID errors... Please wait.")
     
-    # Force the userbot to scan recent chats and cache their hidden access hashes
+    # 1. Force the userbot to scan recent chats and cache their hidden access hashes
     try:
         async for dialog in user_app.get_dialogs(limit=200):
             pass
     except Exception as e:
         print(f"Userbot cache note: {e}")
         
-    # Force the bot to scan its chats
+    # 2. Force the bot to specifically cache the destination chat
     try:
-        async for dialog in bot_app.get_dialogs(limit=50):
-            pass
+        await bot_app.get_chat(DESTINATION_CHAT_ID)
     except Exception as e:
         print(f"Bot cache note: {e}")
 
