@@ -44,7 +44,7 @@ bot_app = Client("my_bot", bot_token=MY_BOT_TOKEN, api_id=API_ID, api_hash=API_H
 # 6. HELPER FUNCTIONS
 # ==========================================
 def is_excluded(text: str) -> bool:
-    """Checks if the text contains any forbidden phrases (case-insensitive)."""
+    """Checks if the text contains any forbidden phrases."""
     if not text:
         return False
     text_lower = text.lower()
@@ -55,16 +55,12 @@ def clean_and_brand_text(text_html: str) -> str:
     if not text_html:
         return ""
     
-    # Step 1: Remove any embedded Telegram links (e.g., t.me/...)
+    # Remove Telegram links and raw @usernames
     cleaned = re.sub(r'<a[^>]*href="https://t\.me/[^>]*>[^<]*</a>', '', text_html)
-    
-    # Step 2: Remove any raw @usernames
     cleaned = re.sub(r'\B@[\w_]+', '', cleaned)
-    
-    # Step 3: Clean up any weird double spaces left behind by the deletions
     cleaned = re.sub(r' +', ' ', cleaned).strip()
     
-    # Step 4: Append your own channel and admin to every message
+    # Append your branding
     if MY_CHANNEL or MY_ADMIN:
         signature = "\n\n"
         if MY_CHANNEL:
@@ -76,16 +72,10 @@ def clean_and_brand_text(text_html: str) -> str:
     return cleaned
 
 # ==========================================
-# 7. MESSAGE EVENT HANDLER
+# 7. CORE MESSAGE PROCESSOR
 # ==========================================
-@user_app.on_message(filters.chat([SOURCE_CHANNEL_ID, SOURCE_GROUP_ID]))
-async def monitor_and_forward(client, message):
-    
-    # RULE: If from the GROUP, it MUST be from the specific bot
-    if message.chat.id == SOURCE_GROUP_ID:
-        if not message.from_user or message.from_user.id != TARGET_BOT_ID:
-            return  
-
+async def process_and_send_message(message):
+    """Handles the actual downloading, cleaning, and sending."""
     raw_content = message.text or message.caption or ""
 
     if is_excluded(raw_content):
@@ -95,7 +85,6 @@ async def monitor_and_forward(client, message):
     # Process Text Messages
     if message.text:
         new_text = clean_and_brand_text(message.text.html)
-            
         await bot_app.send_message(
             chat_id=DESTINATION_CHAT_ID, 
             text=new_text,
@@ -121,29 +110,40 @@ async def monitor_and_forward(client, message):
             else:
                 await bot_app.send_document(DESTINATION_CHAT_ID, document=file_path)
         finally:
+            # Delete local file to free up Railway space
             if os.path.exists(file_path):
                 os.remove(file_path)
                 
         print(f"Bot sent media from {message.chat.id}")
 
 # ==========================================
-# 8. STARTUP & CACHE WARMUP
+# 8. LIVE MESSAGE EVENT HANDLER
+# ==========================================
+@user_app.on_message(filters.chat([SOURCE_CHANNEL_ID, SOURCE_GROUP_ID]))
+async def monitor_and_forward(client, message):
+    # Filter group messages down to only the Target Bot
+    if message.chat.id == SOURCE_GROUP_ID:
+        if not message.from_user or message.from_user.id != TARGET_BOT_ID:
+            return  
+    
+    await process_and_send_message(message)
+
+# ==========================================
+# 9. STARTUP & FETCH LAST MESSAGE
 # ==========================================
 async def main():
     await user_app.start()
     await bot_app.start()
     print("Both Userbot and Target Bot are running!")
     
+    # Cache Warmup
     print("Rebuilding group cache to fix Peer ID errors... Please wait.")
-    
-    # 1. Force the userbot to scan recent chats and cache their hidden access hashes
     try:
         async for dialog in user_app.get_dialogs(limit=200):
             pass
     except Exception as e:
         print(f"Userbot cache note: {e}")
         
-    # 2. Force the bot to specifically cache the destination chat
     try:
         await bot_app.get_chat(DESTINATION_CHAT_ID)
     except Exception as e:
@@ -151,6 +151,24 @@ async def main():
 
     print("Cache successfully rebuilt! Ready to mirror messages.")
     
+    # NEW: Fetch the last message on startup
+    print("Fetching the LAST message sent by the target bot...")
+    try:
+        last_message_found = False
+        # Look through the last 50 messages in the group
+        async for msg in user_app.get_chat_history(SOURCE_GROUP_ID, limit=50):
+            if msg.from_user and msg.from_user.id == TARGET_BOT_ID:
+                print(f"Found the most recent bot message (ID: {msg.id})! Forwarding it now...")
+                await process_and_send_message(msg)
+                last_message_found = True
+                break # Stop searching once we find the first one
+                
+        if not last_message_found:
+            print("No recent messages found from the bot in the group history.")
+    except Exception as e:
+        print(f"Could not fetch last message: {e}")
+
+    # Keep script running continuously
     await idle()
     await user_app.stop()
     await bot_app.stop()
