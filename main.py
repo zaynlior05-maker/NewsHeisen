@@ -175,11 +175,13 @@ async def main():
 
     print("Step 2: Syncing Bot Cache (Silent Ping Method)...")
     try:
-        # Make the bot aware of the chat ID
-        await bot_app.get_chat(DESTINATION_CHAT_ID)
+        # THE FIX: Restored the working Userbot silent ping to sync the destination chat
+        ping_msg = await user_app.send_message(DESTINATION_CHAT_ID, ".", disable_notification=True)
+        await asyncio.sleep(1)
+        await ping_msg.delete() 
         print("Cache sync complete!")
     except Exception as e:
-        print(f"⚠️ Cache sync note: {e}")
+        print(f"⚠️ Cache sync failed: {e}")
 
     print("Step 3: Fetching the LAST message sent by the target bot...")
     try:
