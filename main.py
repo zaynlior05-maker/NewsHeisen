@@ -26,8 +26,11 @@ MY_CHANNEL = os.environ.get("MY_CHANNEL", "")
 MY_ADMIN = os.environ.get("MY_ADMIN", "")
 
 # ==========================================
-# 4. EXCLUDED PHRASES
+# 4. GLOBALS & EXCLUDED PHRASES
 # ==========================================
+BOT_INFO = None
+USER_INFO = None
+
 EXCLUDED_PHRASES = [
     "( PAID AD )",
     "The giveaway has officially ended.",
@@ -44,23 +47,19 @@ bot_app = Client("my_bot", bot_token=MY_BOT_TOKEN, api_id=API_ID, api_hash=API_H
 # 6. HELPER FUNCTIONS
 # ==========================================
 def is_excluded(text: str) -> bool:
-    """Checks if the text contains any forbidden phrases."""
     if not text:
         return False
     text_lower = text.lower()
     return any(phrase.lower() in text_lower for phrase in EXCLUDED_PHRASES)
 
 def clean_and_brand_text(text_html: str) -> str:
-    """Removes all @usernames/links and appends your clean signature format."""
     if not text_html:
         return ""
     
-    # Remove Telegram links and raw @usernames
     cleaned = re.sub(r'<a[^>]*href="https://t\.me/[^>]*>[^<]*</a>', '', text_html)
     cleaned = re.sub(r'\B@[\w_]+', '', cleaned)
     cleaned = re.sub(r' +', ' ', cleaned).strip()
     
-    # Append your clean branding format: @channel / @admin
     if MY_CHANNEL or MY_ADMIN:
         signature_parts = []
         if MY_CHANNEL:
@@ -74,17 +73,16 @@ def clean_and_brand_text(text_html: str) -> str:
     return cleaned
 
 # ==========================================
-# 7. CORE MESSAGE PROCESSOR
+# 7. CORE MESSAGE PROCESSOR (ZERO UPLOAD TRICK)
 # ==========================================
 async def process_and_send_message(message):
-    """Handles the actual downloading, cleaning, and sending."""
     raw_content = message.text or message.caption or ""
 
     if is_excluded(raw_content):
         print(f"Skipped message {message.id} (matched excluded phrase)")
         return
 
-    # Process Text Messages
+    # Process Text Messages Normally
     if message.text:
         new_text = clean_and_brand_text(message.text.html)
         await bot_app.send_message(
@@ -94,59 +92,52 @@ async def process_and_send_message(message):
         )
         print(f"Bot sent text message from {message.chat.id}")
 
-    # Process Media (Photos, Videos, Documents)
+    # Process Media (Zero Download/Upload Relay)
     elif message.media:
         caption_source = message.caption.html if message.caption else ""
         new_caption = clean_and_brand_text(caption_source) if caption_source else clean_and_brand_text(" ")
         
-        print(f"Downloading media for message {message.id} to RAM...")
+        print(f"Relaying media for message {message.id} via Telegram Servers (Zero-Upload Method)...")
         try:
-            # Download directly into RAM to bypass Railway disk freezes
-            file_data = await message.download(in_memory=True)
+            # 1. Userbot silently copies the media to the Bot's private DMs
+            await user_app.copy_message(
+                chat_id=BOT_INFO.username,
+                from_chat_id=message.chat.id,
+                message_id=message.id
+            )
             
-            # CRITICAL FIX: Rewind the in-memory file cursor back to 0 so Telegram doesn't read a 0-byte file
-            file_data.seek(0)
+            # Allow 1.5 seconds for Telegram to deliver it to the Bot's inbox
+            await asyncio.sleep(1.5)
             
-            # Telegram API requires a dummy filename to understand the bytes
-            if message.photo:
-                file_data.name = "image.jpg"
-            elif message.video:
-                file_data.name = "video.mp4"
-            else:
-                file_data.name = "document.file"
-
-            print(f"Uploading media via Bot...")
+            # 2. Bot searches its DMs with the Userbot to find the relayed message
+            async for dm_msg in bot_app.get_chat_history(USER_INFO.id, limit=1):
+                # 3. Bot copies that message to the final destination, swapping the caption
+                await bot_app.copy_message(
+                    chat_id=DESTINATION_CHAT_ID,
+                    from_chat_id=USER_INFO.id,
+                    message_id=dm_msg.id,
+                    caption=new_caption,
+                    parse_mode=enums.ParseMode.HTML
+                )
+                
+                # 4. Bot deletes the message from its DMs to keep things perfectly clean
+                await dm_msg.delete()
+                break # Only process the single newest message
+                
+            print(f"Bot successfully relayed media from {message.chat.id}")
             
-            async def execute_upload():
-                if message.photo:
-                    await bot_app.send_photo(DESTINATION_CHAT_ID, photo=file_data, caption=new_caption, parse_mode=enums.ParseMode.HTML)
-                elif message.video:
-                    await bot_app.send_video(DESTINATION_CHAT_ID, video=file_data, caption=new_caption, parse_mode=enums.ParseMode.HTML)
-                elif message.document:
-                    await bot_app.send_document(DESTINATION_CHAT_ID, document=file_data, caption=new_caption, parse_mode=enums.ParseMode.HTML)
-                else:
-                    await bot_app.send_document(DESTINATION_CHAT_ID, document=file_data)
-
-            # Extended timeout safeguard to 60s for larger media
-            await asyncio.wait_for(execute_upload(), timeout=60.0)
-            print(f"Bot successfully processed media from {message.chat.id}")
-            
-        except asyncio.TimeoutError:
-            print(f"⚠️ TIMEOUT ERROR: The upload for message {message.id} took too long. Skipping.")
         except Exception as e:
-            print(f"Error processing media message {message.id}: {e}")
+            print(f"Error relaying media message {message.id}: {e}")
 
 # ==========================================
 # 8. LIVE MESSAGE EVENT HANDLER
 # ==========================================
 @user_app.on_message(filters.chat([SOURCE_CHANNEL_ID, SOURCE_GROUP_ID]))
 async def monitor_and_forward(client, message):
-    # Filter group messages down to only the Target Bot
     if message.chat.id == SOURCE_GROUP_ID:
         if not message.from_user or message.from_user.id != TARGET_BOT_ID:
             return  
     
-    # Buffer delay to help organize multi-photo albums
     if message.media_group_id:
         await asyncio.sleep(1.0)
         
@@ -156,29 +147,38 @@ async def monitor_and_forward(client, message):
 # 9. STARTUP, CACHE WARMUP & FETCH LAST MESSAGE
 # ==========================================
 async def main():
+    global BOT_INFO, USER_INFO
     await user_app.start()
     await bot_app.start()
     print("Both Userbot and Target Bot are running!")
     
+    # Store global IDs for the Zero-Upload trick
+    BOT_INFO = await bot_app.get_me()
+    USER_INFO = await user_app.get_me()
+    
+    # Establish DM connection between User and Bot so they can share files
+    try:
+        await user_app.send_message(BOT_INFO.username, "/start")
+        await asyncio.sleep(1)
+    except Exception:
+        pass
+
     # Step 1: Userbot Scans Memory
     print("Step 1: Userbot is scanning recent chats to rebuild its own cache...")
     try:
         async for dialog in user_app.get_dialogs(limit=100):
             pass
-    except Exception as e:
-        print(f"Userbot dialog scan note: {e}")
+    except Exception:
+        pass
 
     # Step 2: The Invisible Cache Sync Trick
     print("Step 2: Syncing Bot Cache invisibly...")
     try:
-        bot_info = await bot_app.get_me()
         sync_successful = False
-        
-        # ATTEMPT 1: The Invisible Forward Method
         async for msg in user_app.get_chat_history(DESTINATION_CHAT_ID, limit=1):
             try:
                 sent_msg = await user_app.forward_messages(
-                    chat_id=bot_info.username,
+                    chat_id=BOT_INFO.username,
                     from_chat_id=DESTINATION_CHAT_ID,
                     message_ids=msg.id
                 )
@@ -186,11 +186,10 @@ async def main():
                 await sent_msg.delete()  
                 sync_successful = True
                 print("Cache sync complete! (Invisible Forward Method used)")
-            except Exception as e:
-                print(f"Invisible forward failed: {e}")
+            except Exception:
+                pass
             break 
             
-        # ATTEMPT 2: The Ultra-Fast Silent Fallback
         if not sync_successful:
             print("Attempting ultra-fast silent fallback...")
             ping_msg = await user_app.send_message(DESTINATION_CHAT_ID, ".", disable_notification=True)
