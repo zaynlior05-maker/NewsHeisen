@@ -230,9 +230,23 @@ async def main():
         bot_user = await user_app.get_users(bot_info.username)
         BOT_PEER_ID = bot_user.id
         await user_app.send_message(BOT_PEER_ID, "/start")
-        await bot_app.get_chat(DESTINATION_CHAT_ID)
     except Exception as e:
         print(f"⚠️ Initialization note: {e}")
+
+    # Make sure the BOT has a cached peer (access_hash) for the destination chat.
+    # Bots can't resolve a raw numeric chat ID until they've seen a full Chat
+    # object for it at least once (e.g. via an invite link or a forwarded message).
+    try:
+        await bot_app.get_chat(DESTINATION_CHAT_ID)
+    except Exception:
+        print("⚠️ Bot has no cached peer for destination chat — resolving via invite link...")
+        try:
+            # The userbot is already a member, so it can export the invite link.
+            invite_link = await user_app.export_chat_invite_link(DESTINATION_CHAT_ID)
+            resolved = await bot_app.get_chat(invite_link)
+            print(f"✅ Peer cached for bot: {resolved.id}")
+        except Exception as inner_e:
+            print(f"❌ Still couldn't resolve destination peer: {inner_e}")
 
     try:
         async for dialog in user_app.get_dialogs(limit=50):
