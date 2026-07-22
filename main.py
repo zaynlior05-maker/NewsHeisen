@@ -50,6 +50,32 @@ bot_app = Client("my_bot", bot_token=MY_BOT_TOKEN, api_id=API_ID, api_hash=API_H
 # ==========================================
 # 6. HELPER FUNCTIONS
 # ==========================================
+def is_target_bot(msg) -> bool:
+    """
+    Robustly identifies target messages, even if Telegram hides 
+    the sender ID behind an Anonymous Admin or Linked Channel.
+    """
+    # 1. Direct User/Bot match
+    if msg.from_user and msg.from_user.id == TARGET_BOT_ID:
+        return True
+        
+    # 2. Sent by a Channel or Anonymous Admin
+    if msg.sender_chat and msg.sender_chat.id == TARGET_BOT_ID:
+        return True
+        
+    # 3. Forwarded from the Target Bot
+    if msg.forward_from and msg.forward_from.id == TARGET_BOT_ID:
+        return True
+    if msg.forward_from_chat and msg.forward_from_chat.id == TARGET_BOT_ID:
+        return True
+        
+    # 4. Ultimate Fallback: The bot's signature tag in the text
+    raw_content = msg.text or msg.caption or ""
+    if "@HeisenNewsBot" in raw_content:
+        return True
+        
+    return False
+
 def is_excluded(text: str) -> bool:
     if not text:
         return False
@@ -209,7 +235,8 @@ async def process_and_send_message(message):
 @user_app.on_message(filters.chat([SOURCE_CHANNEL_ID, SOURCE_GROUP_ID]))
 async def monitor_and_forward(client, message):
     if message.chat.id == SOURCE_GROUP_ID:
-        if not message.from_user or message.from_user.id != TARGET_BOT_ID:
+        # THE FIX: Using the new robust target detection
+        if not is_target_bot(message):
             return  
         
     await process_and_send_message(message)
@@ -251,7 +278,8 @@ async def main():
     try:
         last_message_found = False
         async for msg in user_app.get_chat_history(SOURCE_GROUP_ID, limit=50):
-            if msg.from_user and msg.from_user.id == TARGET_BOT_ID:
+            # THE FIX: Using the new robust target detection for startup scanning
+            if is_target_bot(msg):
                 print(f"Found the most recent bot message (ID: {msg.id})! Forwarding it now...")
                 await process_and_send_message(msg)
                 last_message_found = True
