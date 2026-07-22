@@ -31,7 +31,7 @@ BOT_INBOX_LOCKS = {}           # group_id -> asyncio.Lock (per-group lock)
 BOT_INBOX_LOCKS_GUARD = asyncio.Lock()  # protects creation of the per-group lock itself
 
 EXCLUDED_PHRASES = ["( PAID AD )", "The giveaway has officially ended.", "Giveaway Entries"]
-SCRIPT_VERSION = "relay-v6-bot-api-http-2026-07-22"
+SCRIPT_VERSION = "relay-v7-catchup-group-and-channel-2026-07-22"
 
 # How long to wait after the LAST piece of an album arrives before flushing it.
 ALBUM_DEBOUNCE_SECONDS = 2.5
@@ -313,13 +313,46 @@ async def main():
     except Exception as e:
         print(f"⚠️ Bot API getChat check failed (bot may not actually be a member/admin there): {e}")
 
+    # Catch-up: find the most recent qualifying message across BOTH the
+    # source group (must pass is_target_bot) and the source channel (all
+    # messages there are relayed, per monitor_and_forward's logic), and
+    # send whichever one is actually newest. Verbose logging so we can see
+    # exactly what was found instead of debugging blind.
+    async def _find_latest_group_candidate():
+        try:
+            async for msg in user_app.get_chat_history(SOURCE_GROUP_ID, limit=50):
+                if is_target_bot(msg):
+                    return msg
+        except Exception:
+            print(f"⚠️ Could not read SOURCE_GROUP_ID history:\n{traceback.format_exc()}")
+        return None
+
+    async def _find_latest_channel_candidate():
+        try:
+            async for msg in user_app.get_chat_history(SOURCE_CHANNEL_ID, limit=1):
+                return msg
+        except Exception:
+            print(f"⚠️ Could not read SOURCE_CHANNEL_ID history:\n{traceback.format_exc()}")
+        return None
+
     try:
-        async for msg in user_app.get_chat_history(SOURCE_GROUP_ID, limit=50):
-            if is_target_bot(msg):
-                await process_and_send_message(msg)
-                break
+        group_msg = await _find_latest_group_candidate()
+        channel_msg = await _find_latest_channel_candidate()
+
+        print(f"ℹ️ Catch-up scan — group candidate: "
+              f"{'msg #' + str(group_msg.id) + ' @ ' + str(group_msg.date) if group_msg else 'none found'}")
+        print(f"ℹ️ Catch-up scan — channel candidate: "
+              f"{'msg #' + str(channel_msg.id) + ' @ ' + str(channel_msg.date) if channel_msg else 'none found'}")
+
+        candidates = [m for m in (group_msg, channel_msg) if m is not None]
+        if not candidates:
+            print("ℹ️ No catch-up candidate found in either source group or source channel.")
+        else:
+            latest = max(candidates, key=lambda m: m.date)
+            print(f"🚚 Sending catch-up message from chat {latest.chat.id}, msg #{latest.id}...")
+            await process_and_send_message(latest)
     except Exception:
-        pass
+        print(f"❌ Catch-up step failed:\n{traceback.format_exc()}")
 
     await idle()
     await user_app.stop()
