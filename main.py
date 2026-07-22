@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 from pyrogram import Client, filters, enums, idle
+from pyrogram.types import InputMediaPhoto, InputMediaVideo, InputMediaDocument
 
 # ==========================================
 # 1. CREDENTIALS & TOKENS
@@ -29,6 +30,10 @@ MY_ADMIN = os.environ.get("MY_ADMIN", "")
 # 4. GLOBALS & EXCLUDED PHRASES
 # ==========================================
 BOT_INFO = None
+
+# Track albums so we don't process the same group multiple times
+PROCESSED_SOURCE_ALBUMS = set()
+BOT_INBOX_ALBUMS = {}
 
 EXCLUDED_PHRASES = [
     "( PAID AD )",
@@ -74,21 +79,69 @@ def clean_and_brand_text(text_html: str) -> str:
 # ==========================================
 # 7. BOT INBOX LISTENER (THE AGGRESSIVE CATCHER)
 # ==========================================
+async def process_bot_album(group_id):
+    """Waits for all album parts to land in DMs, cleans the first caption, and groups them side-by-side."""
+    await asyncio.sleep(2.5) 
+    messages = BOT_INBOX_ALBUMS.pop(group_id, [])
+    if not messages:
+        return
+
+    # Sort to preserve the exact original image order
+    messages.sort(key=lambda x: x.id)
+    
+    media_list = []
+    has_set_caption = False
+    
+    for msg in messages:
+        caption = ""
+        # Only attach your clean text to the VERY FIRST image in the album
+        if not has_set_caption:
+            raw_caption = msg.caption.html if msg.caption else ""
+            caption = clean_and_brand_text(raw_caption) if raw_caption else clean_and_brand_text(" ")
+            has_set_caption = True
+            
+        # Add the zero-upload files to the media group payload
+        if msg.photo:
+            media_list.append(InputMediaPhoto(media=msg.photo.file_id, caption=caption, parse_mode=enums.ParseMode.HTML))
+        elif msg.video:
+            media_list.append(InputMediaVideo(media=msg.video.file_id, caption=caption, parse_mode=enums.ParseMode.HTML))
+        elif msg.document:
+            media_list.append(InputMediaDocument(media=msg.document.file_id, caption=caption, parse_mode=enums.ParseMode.HTML))
+
+    if media_list:
+        try:
+            # Post the full grouped album to destination instantly
+            await bot_app.send_media_group(DESTINATION_CHAT_ID, media_list)
+            print("✅ SUCCESS: Bot perfectly grouped and relayed the ALBUM!")
+        except Exception as e:
+            print(f"❌ ERROR: Bot failed to post ALBUM: {e}")
+
+    # Clean up Inbox
+    for msg in messages:
+        try:
+            await msg.delete()
+        except:
+            pass
+
 @bot_app.on_message(filters.private)
 async def bot_inbox_handler(client, message):
-    """If ANY media drops into the Bot's inbox, it instantly copies it to the destination."""
-    
-    # We ignore text commands like /start
+    """Catches files dropped in the Inbox. Handles both single items and albums."""
     if not message.media:
         return
+
+    # If it's part of an Album, route it to the Album Manager
+    if message.media_group_id:
+        if message.media_group_id not in BOT_INBOX_ALBUMS:
+            BOT_INBOX_ALBUMS[message.media_group_id] = []
+            asyncio.create_task(process_bot_album(message.media_group_id))
+        BOT_INBOX_ALBUMS[message.media_group_id].append(message)
+        return
         
-    print("⚡️ BOT INBOX CATCH: Received relayed media from Userbot!")
+    # If it's a single image, process immediately
+    print("⚡️ BOT INBOX CATCH: Received single relayed media!")
     try:
-        # Instantly post to destination
         await message.copy(chat_id=DESTINATION_CHAT_ID)
-        print("✅ SUCCESS: Bot instantly relayed the media to the Destination!")
-        
-        # Clean up the inbox
+        print("✅ SUCCESS: Bot instantly relayed the single media!")
         await message.delete()
     except Exception as e:
         print(f"❌ ERROR: Bot failed to post relayed media: {e}")
@@ -97,30 +150,49 @@ async def bot_inbox_handler(client, message):
 # 8. CORE MESSAGE PROCESSOR (USERBOT SIDE)
 # ==========================================
 async def process_and_send_message(message):
-    raw_content = message.text or message.caption or ""
+    
+    # --- ALBUM LOGIC ---
+    if message.media_group_id:
+        if message.media_group_id in PROCESSED_SOURCE_ALBUMS:
+            return # We only need to trigger on the first piece
+        
+        PROCESSED_SOURCE_ALBUMS.add(message.media_group_id)
+        
+        # Wait 1 sec to ensure the full album exists in the source chat
+        await asyncio.sleep(1.0)
+        
+        try:
+            # Fetch the whole group to check for excluded phrases
+            group_msgs = await user_app.get_media_group(message.chat.id, message.id)
+            for g_msg in group_msgs:
+                if is_excluded(g_msg.text or g_msg.caption or ""):
+                    print(f"Skipped album {message.media_group_id} (matched excluded phrase)")
+                    return
+            
+            print(f"Relaying ALBUM {message.media_group_id} to Bot Inbox...")
+            # Silently copy the whole group into the bot's DMs 
+            await user_app.copy_media_group(BOT_INFO.username, message.chat.id, message.id)
+        except Exception as e:
+            print(f"❌ Error passing ALBUM to Bot Inbox: {e}")
+        return
 
+    # --- SINGLE MEDIA/TEXT LOGIC ---
+    raw_content = message.text or message.caption or ""
     if is_excluded(raw_content):
         print(f"Skipped message {message.id} (matched excluded phrase)")
         return
 
-    # Process Text Messages Normally
     if message.text:
         new_text = clean_and_brand_text(message.text.html)
-        await bot_app.send_message(
-            chat_id=DESTINATION_CHAT_ID, 
-            text=new_text,
-            parse_mode=enums.ParseMode.HTML
-        )
+        await bot_app.send_message(chat_id=DESTINATION_CHAT_ID, text=new_text, parse_mode=enums.ParseMode.HTML)
         print(f"Bot directly sent text message from {message.chat.id}")
 
-    # Process Media (Zero Download/Upload Relay)
     elif message.media:
         caption_source = message.caption.html if message.caption else ""
         new_caption = clean_and_brand_text(caption_source) if caption_source else clean_and_brand_text(" ")
         
-        print(f"Relaying media for message {message.id} to Bot Inbox...")
+        print(f"Relaying single media {message.id} to Bot Inbox...")
         try:
-            # Userbot silently copies the media to the Bot's DMs and attaches the new caption
             await user_app.copy_message(
                 chat_id=BOT_INFO.username,
                 from_chat_id=message.chat.id,
@@ -128,9 +200,6 @@ async def process_and_send_message(message):
                 caption=new_caption,
                 parse_mode=enums.ParseMode.HTML
             )
-            
-            # Tiny 2-second pause to let the Bot Inbox Catch print its success log cleanly
-            await asyncio.sleep(2)
         except Exception as e:
             print(f"❌ Error passing media to Bot Inbox: {e}")
 
@@ -142,9 +211,6 @@ async def monitor_and_forward(client, message):
     if message.chat.id == SOURCE_GROUP_ID:
         if not message.from_user or message.from_user.id != TARGET_BOT_ID:
             return  
-    
-    if message.media_group_id:
-        await asyncio.sleep(1.0)
         
     await process_and_send_message(message)
 
@@ -159,7 +225,6 @@ async def main():
     
     BOT_INFO = await bot_app.get_me()
     
-    # Send a quick start ping to ensure DMs are open
     try:
         await user_app.send_message(BOT_INFO.username, "/start")
         await asyncio.sleep(1)
@@ -175,7 +240,6 @@ async def main():
 
     print("Step 2: Syncing Bot Cache (Silent Ping Method)...")
     try:
-        # THE FIX: Restored the working Userbot silent ping to sync the destination chat
         ping_msg = await user_app.send_message(DESTINATION_CHAT_ID, ".", disable_notification=True)
         await asyncio.sleep(1)
         await ping_msg.delete() 
