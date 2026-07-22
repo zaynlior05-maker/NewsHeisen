@@ -236,8 +236,8 @@ async def main():
     
     bot_info = await bot_app.get_me()
     
-    # Resolve and cache the Bot user object inside Userbot's peer store
-    bot_user = await user_app.get_users(bot_info.id)
+    # THE FIX: Resolve the Bot's string username first so Telegram legally caches the ID
+    bot_user = await user_app.get_users(bot_info.username)
     BOT_PEER_ID = bot_user.id
     print(f"Bot peer successfully initialized (ID: {BOT_PEER_ID})")
     
