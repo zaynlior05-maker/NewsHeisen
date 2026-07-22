@@ -233,6 +233,27 @@ async def main():
     except Exception as e:
         print(f"⚠️ Initialization note: {e}")
 
+    # IMPORTANT: sync the userbot's own dialog list FIRST. Pyrogram only caches
+    # peer access_hashes for chats it has actually seen — a fresh/short-lived
+    # session may not have DESTINATION_CHAT_ID cached yet even if the account
+    # is genuinely a member. get_dialogs() forces a full sync of every chat
+    # the userbot is in, which populates that cache.
+    try:
+        dialog_count = 0
+        async for dialog in user_app.get_dialogs(limit=200):
+            dialog_count += 1
+        print(f"🔄 Synced {dialog_count} userbot dialogs.")
+    except Exception:
+        print(f"⚠️ Dialog sync failed:\n{traceback.format_exc()}")
+
+    # Make sure the USERBOT itself can resolve the destination chat first —
+    # export_chat_invite_link below depends on this working.
+    try:
+        await user_app.get_chat(DESTINATION_CHAT_ID)
+    except Exception:
+        print(f"⚠️ Userbot still can't see destination chat after dialog sync. "
+              f"Double-check the userbot account is actually a member of {DESTINATION_CHAT_ID}.")
+
     # Make sure the BOT has a cached peer (access_hash) for the destination chat.
     # Bots can't resolve a raw numeric chat ID until they've seen a full Chat
     # object for it at least once (e.g. via an invite link or a forwarded message).
@@ -247,12 +268,6 @@ async def main():
             print(f"✅ Peer cached for bot: {resolved.id}")
         except Exception as inner_e:
             print(f"❌ Still couldn't resolve destination peer: {inner_e}")
-
-    try:
-        async for dialog in user_app.get_dialogs(limit=50):
-            pass
-    except Exception:
-        pass
 
     try:
         async for msg in user_app.get_chat_history(SOURCE_GROUP_ID, limit=50):
