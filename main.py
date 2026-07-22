@@ -29,7 +29,6 @@ MY_ADMIN = os.environ.get("MY_ADMIN", "")
 # 4. GLOBALS & EXCLUDED PHRASES
 # ==========================================
 BOT_INFO = None
-USER_INFO = None
 
 EXCLUDED_PHRASES = [
     "( PAID AD )",
@@ -73,7 +72,29 @@ def clean_and_brand_text(text_html: str) -> str:
     return cleaned
 
 # ==========================================
-# 7. CORE MESSAGE PROCESSOR (USERBOT SIDE)
+# 7. BOT INBOX LISTENER (THE AGGRESSIVE CATCHER)
+# ==========================================
+@bot_app.on_message(filters.private)
+async def bot_inbox_handler(client, message):
+    """If ANY media drops into the Bot's inbox, it instantly copies it to the destination."""
+    
+    # We ignore text commands like /start
+    if not message.media:
+        return
+        
+    print("⚡️ BOT INBOX CATCH: Received relayed media from Userbot!")
+    try:
+        # Instantly post to destination
+        await message.copy(chat_id=DESTINATION_CHAT_ID)
+        print("✅ SUCCESS: Bot instantly relayed the media to the Destination!")
+        
+        # Clean up the inbox
+        await message.delete()
+    except Exception as e:
+        print(f"❌ ERROR: Bot failed to post relayed media: {e}")
+
+# ==========================================
+# 8. CORE MESSAGE PROCESSOR (USERBOT SIDE)
 # ==========================================
 async def process_and_send_message(message):
     raw_content = message.text or message.caption or ""
@@ -90,7 +111,7 @@ async def process_and_send_message(message):
             text=new_text,
             parse_mode=enums.ParseMode.HTML
         )
-        print(f"Bot sent text message from {message.chat.id}")
+        print(f"Bot directly sent text message from {message.chat.id}")
 
     # Process Media (Zero Download/Upload Relay)
     elif message.media:
@@ -107,29 +128,11 @@ async def process_and_send_message(message):
                 caption=new_caption,
                 parse_mode=enums.ParseMode.HTML
             )
-        except Exception as e:
-            print(f"Error passing media to Bot Inbox: {e}")
-
-# ==========================================
-# 8. BOT INBOX LISTENER (BOT SIDE)
-# ==========================================
-@bot_app.on_message(filters.private)
-async def bot_dm_handler(client, message):
-    """Listens for files dropped in the Bot's DMs by the Userbot and forwards them."""
-    global USER_INFO
-    
-    # Check if the DM came directly from your specific Userbot account
-    if USER_INFO and message.chat.id == USER_INFO.id:
-        # Ignore startup pings
-        if message.text == "/start":
-            return
             
-        try:
-            # The Bot copies the file from its Inbox directly to the Destination Channel
-            await message.copy(chat_id=DESTINATION_CHAT_ID)
-            print(f"Bot successfully relayed media to destination!")
+            # Tiny 2-second pause to let the Bot Inbox Catch print its success log cleanly
+            await asyncio.sleep(2)
         except Exception as e:
-            print(f"Bot failed to post media to destination: {e}")
+            print(f"❌ Error passing media to Bot Inbox: {e}")
 
 # ==========================================
 # 9. LIVE MESSAGE EVENT HANDLER
@@ -149,15 +152,14 @@ async def monitor_and_forward(client, message):
 # 10. STARTUP, CACHE WARMUP & FETCH LAST MESSAGE
 # ==========================================
 async def main():
-    global BOT_INFO, USER_INFO
+    global BOT_INFO
     await user_app.start()
     await bot_app.start()
     print("Both Userbot and Target Bot are running!")
     
     BOT_INFO = await bot_app.get_me()
-    USER_INFO = await user_app.get_me()
     
-    # Establish connection between User and Bot so they can DM files
+    # Send a quick start ping to ensure DMs are open
     try:
         await user_app.send_message(BOT_INFO.username, "/start")
         await asyncio.sleep(1)
@@ -173,13 +175,11 @@ async def main():
 
     print("Step 2: Syncing Bot Cache (Silent Ping Method)...")
     try:
-        # Drops a completely invisible dot to sync the Bot's cache memory
-        ping_msg = await user_app.send_message(DESTINATION_CHAT_ID, ".", disable_notification=True)
-        await asyncio.sleep(0.5)
-        await ping_msg.delete() 
+        # Make the bot aware of the chat ID
+        await bot_app.get_chat(DESTINATION_CHAT_ID)
         print("Cache sync complete!")
     except Exception as e:
-        print(f"⚠️ Cache sync failed: {e}")
+        print(f"⚠️ Cache sync note: {e}")
 
     print("Step 3: Fetching the LAST message sent by the target bot...")
     try:
