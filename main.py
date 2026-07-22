@@ -101,7 +101,7 @@ async def process_and_send_message(message):
         
         print(f"Downloading media for message {message.id} to RAM...")
         try:
-            # NEW: Download directly into RAM (in_memory=True) to bypass Railway disk freezes
+            # Download directly into RAM to bypass Railway disk freezes
             file_data = await message.download(in_memory=True)
             
             # Telegram API requires a dummy filename to understand the bytes
@@ -124,7 +124,7 @@ async def process_and_send_message(message):
                 else:
                     await bot_app.send_document(DESTINATION_CHAT_ID, document=file_data)
 
-            # Timeout safeguard remains just in case Telegram servers are slow
+            # Timeout safeguard to prevent frozen uploads
             await asyncio.wait_for(execute_upload(), timeout=45.0)
             print(f"Bot successfully processed media from {message.chat.id}")
             
@@ -165,15 +165,40 @@ async def main():
     except Exception as e:
         print(f"Userbot dialog scan note: {e}")
 
-    # Step 2: Ghost Ping Trick
-    print("Step 2: Executing the ghost ping to sync the Destination Chat for the Bot...")
+    # Step 2: The Invisible Cache Sync Trick
+    print("Step 2: Syncing Bot Cache invisibly...")
     try:
-        ping_msg = await user_app.send_message(DESTINATION_CHAT_ID, "🔄 [System] Syncing bot cache...")
-        await asyncio.sleep(3) 
-        await ping_msg.delete()
-        print("Cache sync complete! The Bot has successfully resolved the Destination Chat.")
+        bot_info = await bot_app.get_me()
+        sync_successful = False
+        
+        # ATTEMPT 1: The Invisible Forward Method
+        # Secretly forwards 1 recent message to the bot's DMs to teach it the Chat ID
+        async for msg in user_app.get_chat_history(DESTINATION_CHAT_ID, limit=1):
+            try:
+                sent_msg = await user_app.forward_messages(
+                    chat_id=bot_info.username,
+                    from_chat_id=DESTINATION_CHAT_ID,
+                    message_ids=msg.id
+                )
+                await asyncio.sleep(1.5) # Let the bot process the DM
+                await sent_msg.delete()  # Clean up the DM secretly
+                sync_successful = True
+                print("Cache sync complete! (Invisible Forward Method used)")
+            except Exception as e:
+                print(f"Invisible forward failed: {e}")
+            break # We only need one message
+            
+        # ATTEMPT 2: The Ultra-Fast Silent Fallback
+        # Only runs if the chat has 0 message history to forward
+        if not sync_successful:
+            print("Attempting ultra-fast silent fallback...")
+            ping_msg = await user_app.send_message(DESTINATION_CHAT_ID, ".", disable_notification=True)
+            await ping_msg.delete() # Deletes instantly before anyone can read it
+            await asyncio.sleep(1)
+            print("Cache sync complete! (Silent Ping Method used)")
+            
     except Exception as e:
-        print(f"⚠️ Ghost ping failed: {e}")
+        print(f"⚠️ Cache sync failed: {e}")
 
     # Step 3: Fetch Last Message
     print("Step 3: Fetching the LAST message sent by the target bot...")
