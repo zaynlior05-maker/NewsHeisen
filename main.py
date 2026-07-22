@@ -30,8 +30,6 @@ MY_ADMIN = os.environ.get("MY_ADMIN", "")
 # 4. GLOBALS & EXCLUDED PHRASES
 # ==========================================
 BOT_PEER_ID = None
-
-# Track albums so we don't process the same group multiple times
 PROCESSED_SOURCE_ALBUMS = set()
 BOT_INBOX_ALBUMS = {}
 
@@ -51,7 +49,6 @@ bot_app = Client("my_bot", bot_token=MY_BOT_TOKEN, api_id=API_ID, api_hash=API_H
 # 6. HELPER FUNCTIONS
 # ==========================================
 def is_target_bot(msg) -> bool:
-    """Identifies target messages across standard posts, channel links, and fwd chats."""
     if msg.from_user and msg.from_user.id == TARGET_BOT_ID:
         return True
     if msg.sender_chat and msg.sender_chat.id == TARGET_BOT_ID:
@@ -64,14 +61,12 @@ def is_target_bot(msg) -> bool:
     raw_content = msg.text or msg.caption or ""
     if "@HeisenNewsBot" in raw_content:
         return True
-        
     return False
 
 def is_excluded(text: str) -> bool:
     if not text:
         return False
-    text_lower = text.lower()
-    return any(phrase.lower() in text_lower for phrase in EXCLUDED_PHRASES)
+    return any(phrase.lower() in text.lower() for phrase in EXCLUDED_PHRASES)
 
 def clean_and_brand_text(text_html: str) -> str:
     if not text_html:
@@ -94,70 +89,73 @@ def clean_and_brand_text(text_html: str) -> str:
     return cleaned
 
 # ==========================================
-# 7. BOT INBOX LISTENER (THE AGGRESSIVE CATCHER)
+# 7. BOT INBOX LISTENER (THE CATCHER)
 # ==========================================
 async def process_bot_album(group_id):
-    """Waits for all album parts to land in DMs, cleans the first caption, and groups them side-by-side."""
-    await asyncio.sleep(2.5) 
-    messages = BOT_INBOX_ALBUMS.pop(group_id, [])
-    if not messages:
-        return
+    """Waits for all album parts, cleans caption, and groups them safely."""
+    try:
+        await asyncio.sleep(3.0) 
+        messages = BOT_INBOX_ALBUMS.pop(group_id, [])
+        if not messages:
+            return
 
-    # Sort to preserve exact original image order
-    messages.sort(key=lambda x: x.id)
-    
-    media_list = []
-    has_set_caption = False
-    
-    for msg in messages:
-        caption = ""
-        if not has_set_caption:
-            raw_caption = msg.caption.html if msg.caption else ""
-            caption = clean_and_brand_text(raw_caption) if raw_caption else clean_and_brand_text(" ")
-            has_set_caption = True
-            
-        if msg.photo:
-            media_list.append(InputMediaPhoto(media=msg.photo.file_id, caption=caption, parse_mode=enums.ParseMode.HTML))
-        elif msg.video:
-            media_list.append(InputMediaVideo(media=msg.video.file_id, caption=caption, parse_mode=enums.ParseMode.HTML))
-        elif msg.document:
-            media_list.append(InputMediaDocument(media=msg.document.file_id, caption=caption, parse_mode=enums.ParseMode.HTML))
+        print(f"🛠️ BOT INBOX: Processing Album Group with {len(messages)} items...")
+        messages.sort(key=lambda x: x.id)
+        
+        media_list = []
+        has_set_caption = False
+        
+        for msg in messages:
+            caption = ""
+            if not has_set_caption:
+                raw_caption = msg.caption.html if msg.caption else ""
+                caption = clean_and_brand_text(raw_caption) if raw_caption else clean_and_brand_text(" ")
+                has_set_caption = True
+                
+            if msg.photo:
+                media_list.append(InputMediaPhoto(media=msg.photo.file_id, caption=caption, parse_mode=enums.ParseMode.HTML))
+            elif msg.video:
+                media_list.append(InputMediaVideo(media=msg.video.file_id, caption=caption, parse_mode=enums.ParseMode.HTML))
+            elif msg.document:
+                media_list.append(InputMediaDocument(media=msg.document.file_id, caption=caption, parse_mode=enums.ParseMode.HTML))
 
-    if media_list:
-        try:
+        if media_list:
+            # Pushing to destination
             await bot_app.send_media_group(DESTINATION_CHAT_ID, media_list)
             print("✅ SUCCESS: Bot perfectly grouped and relayed the ALBUM to destination!")
-        except Exception as e:
-            print(f"❌ ERROR: Bot failed to post ALBUM to destination: {e}")
 
-    # Clean up Inbox
-    for msg in messages:
-        try:
-            await msg.delete()
-        except Exception:
-            pass
+        # Clean up Inbox
+        for msg in messages:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+
+    except Exception as e:
+        # This prevents the task from dying silently!
+        print(f"❌ CRITICAL ERROR IN ALBUM TASK: {e}")
+
 
 @bot_app.on_message(filters.private)
 async def bot_inbox_handler(client, message):
-    """Catches files dropped in the Inbox. Handles both single items and albums."""
-    if not message.media:
-        return
-
-    # If part of an Album, route to Album Manager
-    if message.media_group_id:
-        if message.media_group_id not in BOT_INBOX_ALBUMS:
-            BOT_INBOX_ALBUMS[message.media_group_id] = []
-            asyncio.create_task(process_bot_album(message.media_group_id))
-        BOT_INBOX_ALBUMS[message.media_group_id].append(message)
-        return
-        
-    print("⚡️ BOT INBOX CATCH: Received single relayed media!")
     try:
+        if not message.media:
+            return
+
+        if message.media_group_id:
+            print(f"📦 BOT INBOX CATCH: Album Piece Received (ID: {message.id})")
+            if message.media_group_id not in BOT_INBOX_ALBUMS:
+                BOT_INBOX_ALBUMS[message.media_group_id] = []
+                asyncio.create_task(process_bot_album(message.media_group_id))
+            BOT_INBOX_ALBUMS[message.media_group_id].append(message)
+            return
+            
+        print("⚡️ BOT INBOX CATCH: Received single relayed media!")
         await message.copy(chat_id=DESTINATION_CHAT_ID)
         print("✅ SUCCESS: Bot instantly relayed the single media to destination!")
         await message.delete()
     except Exception as e:
-        print(f"❌ ERROR: Bot failed to post relayed media to destination: {e}")
+        print(f"❌ ERROR in bot_inbox_handler: {e}")
 
 # ==========================================
 # 8. CORE MESSAGE PROCESSOR (USERBOT SIDE)
@@ -165,11 +163,9 @@ async def bot_inbox_handler(client, message):
 async def process_and_send_message(message):
     global BOT_PEER_ID
     
-    # --- ALBUM LOGIC ---
     if message.media_group_id:
         if message.media_group_id in PROCESSED_SOURCE_ALBUMS:
             return 
-        
         PROCESSED_SOURCE_ALBUMS.add(message.media_group_id)
         await asyncio.sleep(1.0)
         
@@ -181,12 +177,12 @@ async def process_and_send_message(message):
                     return
             
             print(f"Relaying ALBUM {message.media_group_id} to Bot Inbox...")
-            await user_app.copy_media_group(BOT_PEER_ID, message.chat.id, message.id)
+            sent = await user_app.copy_media_group(BOT_PEER_ID, message.chat.id, message.id)
+            print(f"✅ Userbot successfully passed {len(sent)} album pieces to Bot.")
         except Exception as e:
             print(f"❌ Error passing ALBUM to Bot Inbox: {e}")
         return
 
-    # --- SINGLE MEDIA/TEXT LOGIC ---
     raw_content = message.text or message.caption or ""
     if is_excluded(raw_content):
         print(f"Skipped message {message.id} (matched excluded phrase)")
@@ -195,13 +191,13 @@ async def process_and_send_message(message):
     if message.text:
         new_text = clean_and_brand_text(message.text.html)
         await bot_app.send_message(chat_id=DESTINATION_CHAT_ID, text=new_text, parse_mode=enums.ParseMode.HTML)
-        print(f"Bot directly sent text message from {message.chat.id}")
+        print(f"✅ Bot directly sent text message from {message.chat.id}")
 
     elif message.media:
         caption_source = message.caption.html if message.caption else ""
         new_caption = clean_and_brand_text(caption_source) if caption_source else clean_and_brand_text(" ")
         
-        print(f"Relaying single media {message.id} to Bot Inbox (ID: {BOT_PEER_ID})...")
+        print(f"Relaying single media {message.id} to Bot Inbox...")
         try:
             await user_app.copy_message(
                 chat_id=BOT_PEER_ID,
@@ -222,11 +218,10 @@ async def monitor_and_forward(client, message):
     if message.chat.id == SOURCE_GROUP_ID:
         if not is_target_bot(message):
             return  
-        
     await process_and_send_message(message)
 
 # ==========================================
-# 10. STARTUP, CACHE WARMUP & FETCH LAST MESSAGE
+# 10. STARTUP & WARMUP
 # ==========================================
 async def main():
     global BOT_PEER_ID
@@ -236,33 +231,25 @@ async def main():
     
     bot_info = await bot_app.get_me()
     
-    # THE FIX: Resolve the Bot's string username first so Telegram legally caches the ID
-    bot_user = await user_app.get_users(bot_info.username)
-    BOT_PEER_ID = bot_user.id
-    print(f"Bot peer successfully initialized (ID: {BOT_PEER_ID})")
-    
-    # Establish active DM chat session using resolved integer ID
+    print("Step 1: Teaching system the exact IDs invisibly...")
     try:
+        # Cache the Bot ID for the Userbot
+        bot_user = await user_app.get_users(bot_info.username)
+        BOT_PEER_ID = bot_user.id
         await user_app.send_message(BOT_PEER_ID, "/start")
-        await asyncio.sleep(1)
+        
+        # Cache the Destination Channel ID for the Bot (Replaces the . ping)
+        await bot_app.get_chat(DESTINATION_CHAT_ID)
+        print("✅ Core routing IDs permanently cached!")
     except Exception as e:
-        print(f"DM initialization note: {e}")
+        print(f"⚠️ Initialization note: {e}")
 
-    print("Step 1: Userbot is scanning recent chats to rebuild its own cache...")
+    print("Step 2: Scanning history...")
     try:
-        async for dialog in user_app.get_dialogs(limit=100):
+        async for dialog in user_app.get_dialogs(limit=50):
             pass
     except Exception:
         pass
-
-    print("Step 2: Syncing Bot Cache (Silent Ping Method)...")
-    try:
-        ping_msg = await user_app.send_message(DESTINATION_CHAT_ID, ".", disable_notification=True)
-        await asyncio.sleep(1)
-        await ping_msg.delete() 
-        print("Cache sync complete!")
-    except Exception as e:
-        print(f"⚠️ Cache sync failed: {e}")
 
     print("Step 3: Fetching the LAST message sent by the target bot...")
     try:
