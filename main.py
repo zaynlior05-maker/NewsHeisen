@@ -242,27 +242,33 @@ async def process_and_send_message(message):
     global BOT_PEER_ID
     if message.media_group_id:
         if message.media_group_id in PROCESSED_SOURCE_ALBUMS:
+            print(f"ℹ️ Album group {message.media_group_id} already processed, skipping.")
             return
         PROCESSED_SOURCE_ALBUMS.add(message.media_group_id)
         await asyncio.sleep(1.0)
         try:
             group_msgs = await user_app.get_media_group(message.chat.id, message.id)
+            print(f"ℹ️ Fetched {len(group_msgs)} messages for album group {message.media_group_id}.")
             for g_msg in group_msgs:
                 if is_excluded(g_msg.text or g_msg.caption or ""):
+                    print(f"🚫 Album {message.media_group_id} excluded by phrase filter.")
                     return
             await user_app.copy_media_group(BOT_PEER_ID, message.chat.id, message.id)
+            print(f"✅ Userbot copied album {message.media_group_id} into bot's inbox — waiting for bot to relay it.")
         except Exception:
             print(f"❌ Error passing ALBUM to Bot Inbox:\n{traceback.format_exc()}")
         return
 
     raw_content = message.text or message.caption or ""
     if is_excluded(raw_content):
+        print(f"🚫 Message #{message.id} excluded by phrase filter.")
         return
 
     if message.text:
         new_text = clean_and_brand_text(message.text.html)
         try:
             await bot_api_send_text(DESTINATION_CHAT_ID, new_text)
+            print(f"✅ SUCCESS: Text message #{message.id} sent directly to destination via Bot API.")
         except Exception:
             print(f"❌ Error sending text to destination via Bot API:\n{traceback.format_exc()}")
     elif message.media:
@@ -270,6 +276,7 @@ async def process_and_send_message(message):
         new_caption = clean_and_brand_text(caption_source) if caption_source else clean_and_brand_text(" ")
         try:
             await user_app.copy_message(chat_id=BOT_PEER_ID, from_chat_id=message.chat.id, message_id=message.id, caption=new_caption, parse_mode=enums.ParseMode.HTML)
+            print(f"✅ Userbot copied single media #{message.id} into bot's inbox — waiting for bot to relay it.")
             await asyncio.sleep(2)
         except Exception:
             print(f"❌ Error passing single media to Bot Inbox:\n{traceback.format_exc()}")
