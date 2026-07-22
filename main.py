@@ -153,6 +153,15 @@ async def process_bot_album(group_id):
 @bot_app.on_message(filters.private)
 async def bot_inbox_handler(client, message):
     try:
+        # Ignore/clean up the one-off "priming" forward used at startup to
+        # cache the bot's peer for the destination chat — never relay it.
+        if message.forward_from_chat and message.forward_from_chat.id == DESTINATION_CHAT_ID:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+
         if not message.media:
             return
 
@@ -256,16 +265,27 @@ async def main():
 
     # Make sure the BOT has a cached peer (access_hash) for the destination chat.
     # Bots can't resolve a raw numeric chat ID until they've seen a full Chat
-    # object for it at least once (e.g. via an invite link or a forwarded message).
+    # object for it at least once. export_chat_invite_link needs admin/invite
+    # rights the userbot may not have, so instead we forward one existing
+    # message from the destination chat into the bot's DM — forwarding only
+    # requires membership, and the forward header carries full chat info,
+    # which primes Pyrogram's peer cache for the bot. bot_inbox_handler
+    # recognizes and silently deletes this priming message (see PRIMING_CHAT_ID).
     try:
         await bot_app.get_chat(DESTINATION_CHAT_ID)
     except Exception:
-        print("⚠️ Bot has no cached peer for destination chat — resolving via invite link...")
+        print("⚠️ Bot has no cached peer for destination chat — priming via forward...")
         try:
-            # The userbot is already a member, so it can export the invite link.
-            invite_link = await user_app.export_chat_invite_link(DESTINATION_CHAT_ID)
-            resolved = await bot_app.get_chat(invite_link)
-            print(f"✅ Peer cached for bot: {resolved.id}")
+            history = []
+            async for m in user_app.get_chat_history(DESTINATION_CHAT_ID, limit=1):
+                history.append(m)
+            if not history:
+                print("❌ Destination chat has no messages to forward for priming.")
+            else:
+                await user_app.forward_messages(BOT_PEER_ID, DESTINATION_CHAT_ID, history[0].id)
+                await asyncio.sleep(2.0)  # give the bot a moment to receive & process it
+                resolved = await bot_app.get_chat(DESTINATION_CHAT_ID)
+                print(f"✅ Peer cached for bot: {resolved.id}")
         except Exception as inner_e:
             print(f"❌ Still couldn't resolve destination peer: {inner_e}")
 
