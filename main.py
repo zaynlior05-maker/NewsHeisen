@@ -28,6 +28,8 @@ BOT_INBOX_LOCKS = {}           # group_id -> asyncio.Lock (per-group lock)
 BOT_INBOX_LOCKS_GUARD = asyncio.Lock()  # protects creation of the per-group lock itself
 
 EXCLUDED_PHRASES = ["( PAID AD )", "The giveaway has officially ended.", "Giveaway Entries"]
+DESTINATION_INVITE_LINK = os.environ.get("DESTINATION_INVITE_LINK", "").strip()
+SCRIPT_VERSION = "relay-v5-invite-link-2026-07-22"
 
 # How long to wait after the LAST piece of an album arrives before flushing it.
 # (debounce, not a fixed "wait once" sleep — resets every time a new piece arrives)
@@ -231,6 +233,7 @@ async def monitor_and_forward(client, message):
 # 7. STARTUP & CACHE WARMUP
 async def main():
     global BOT_PEER_ID
+    print(f"🚀 SCRIPT VERSION: {SCRIPT_VERSION}")
     await user_app.start()
     await bot_app.start()
 
@@ -265,29 +268,47 @@ async def main():
 
     # Make sure the BOT has a cached peer (access_hash) for the destination chat.
     # Bots can't resolve a raw numeric chat ID until they've seen a full Chat
-    # object for it at least once. export_chat_invite_link needs admin/invite
-    # rights the userbot may not have, so instead we forward one existing
-    # message from the destination chat into the bot's DM — forwarding only
-    # requires membership, and the forward header carries full chat info,
-    # which primes Pyrogram's peer cache for the bot. bot_inbox_handler
-    # recognizes and silently deletes this priming message (see PRIMING_CHAT_ID).
+    # object for it at least once. Preferred method: a real invite link for the
+    # chat (set DESTINATION_INVITE_LINK) — this works for admins/members
+    # without needing special export permissions. Fallback: forward-priming.
     try:
         await bot_app.get_chat(DESTINATION_CHAT_ID)
+        print("✅ Bot already has destination chat cached.")
     except Exception:
-        print("⚠️ Bot has no cached peer for destination chat — priming via forward...")
-        try:
-            history = []
-            async for m in user_app.get_chat_history(DESTINATION_CHAT_ID, limit=1):
-                history.append(m)
-            if not history:
-                print("❌ Destination chat has no messages to forward for priming.")
-            else:
-                await user_app.forward_messages(BOT_PEER_ID, DESTINATION_CHAT_ID, history[0].id)
-                await asyncio.sleep(2.0)  # give the bot a moment to receive & process it
-                resolved = await bot_app.get_chat(DESTINATION_CHAT_ID)
-                print(f"✅ Peer cached for bot: {resolved.id}")
-        except Exception as inner_e:
-            print(f"❌ Still couldn't resolve destination peer: {inner_e}")
+        resolved = False
+
+        if DESTINATION_INVITE_LINK:
+            print("⚠️ Bot has no cached peer for destination chat — resolving via provided invite link...")
+            try:
+                chat = await bot_app.get_chat(DESTINATION_INVITE_LINK)
+                print(f"✅ Peer cached for bot via invite link: {chat.id}")
+                resolved = True
+            except Exception as e:
+                print(f"❌ Invite link resolution failed: {e}")
+        else:
+            print("ℹ️ No DESTINATION_INVITE_LINK set — skipping invite-link resolution.")
+
+        if not resolved:
+            print("⚠️ Falling back to forward-priming...")
+            try:
+                history = []
+                async for m in user_app.get_chat_history(DESTINATION_CHAT_ID, limit=1):
+                    history.append(m)
+                if not history:
+                    print("❌ Destination chat has no messages to forward for priming.")
+                else:
+                    await user_app.forward_messages(BOT_PEER_ID, DESTINATION_CHAT_ID, history[0].id)
+                    await asyncio.sleep(2.0)
+                    resolved_chat = await bot_app.get_chat(DESTINATION_CHAT_ID)
+                    print(f"✅ Peer cached for bot via forward: {resolved_chat.id}")
+                    resolved = True
+            except Exception as inner_e:
+                print(f"❌ Forward-priming also failed: {inner_e}")
+
+        if not resolved:
+            print("❌❌❌ COULD NOT RESOLVE DESTINATION PEER BY ANY METHOD. "
+                  "Set DESTINATION_INVITE_LINK to a real invite link for this chat "
+                  "(get it from the Telegram app: group info → Invite Link) and redeploy.")
 
     try:
         async for msg in user_app.get_chat_history(SOURCE_GROUP_ID, limit=50):
