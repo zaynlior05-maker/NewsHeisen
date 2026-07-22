@@ -1,7 +1,10 @@
 import os
 import re
+import json
 import asyncio
 import traceback
+import urllib.request
+import urllib.error
 from pyrogram import Client, filters, enums, idle
 from pyrogram.types import InputMediaPhoto, InputMediaVideo, InputMediaDocument
 
@@ -23,21 +26,64 @@ PROCESSED_SOURCE_ALBUMS = set()
 
 # Album re-assembly state, guarded by a lock to avoid the race condition
 # that was causing lost / duplicated / silently-dropped albums.
-BOT_INBOX_ALBUMS = {}          # group_id -> list[Message]
+BOT_INBOX_ALBUMS = {}          # group_id -> {"messages": [...], "dirty": bool}
 BOT_INBOX_LOCKS = {}           # group_id -> asyncio.Lock (per-group lock)
 BOT_INBOX_LOCKS_GUARD = asyncio.Lock()  # protects creation of the per-group lock itself
 
 EXCLUDED_PHRASES = ["( PAID AD )", "The giveaway has officially ended.", "Giveaway Entries"]
-DESTINATION_INVITE_LINK = os.environ.get("DESTINATION_INVITE_LINK", "").strip()
-SCRIPT_VERSION = "relay-v5-invite-link-2026-07-22"
+SCRIPT_VERSION = "relay-v6-bot-api-http-2026-07-22"
 
 # How long to wait after the LAST piece of an album arrives before flushing it.
-# (debounce, not a fixed "wait once" sleep — resets every time a new piece arrives)
 ALBUM_DEBOUNCE_SECONDS = 2.5
 
 # 3. CLIENTS
 user_app = Client("user_account", session_string=SESSION_STRING, api_id=API_ID, api_hash=API_HASH)
 bot_app = Client("my_bot", bot_token=MY_BOT_TOKEN, api_id=API_ID, api_hash=API_HASH)
+
+# 3b. RAW BOT API (HTTPS) — used ONLY for sending to DESTINATION_CHAT_ID.
+# This completely bypasses Pyrogram's MTProto peer-cache requirement, because
+# the classic Bot API resolves chat_id server-side (the bot just needs to be
+# a current member — no local access_hash needed). This is what actually
+# fixes "Peer id invalid" for good, since that error is purely a client-side
+# MTProto limitation that invite links and forwards can't reliably solve for
+# bot accounts (bots can't even call checkChatInvite — BOT_METHOD_INVALID).
+TELEGRAM_API_BASE = f"https://api.telegram.org/bot{MY_BOT_TOKEN}"
+
+def _bot_api_call_sync(method: str, payload: dict):
+    url = f"{TELEGRAM_API_BASE}/{method}"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        try:
+            return json.loads(body)
+        except Exception:
+            raise RuntimeError(f"HTTP {e.code} calling {method}: {body}")
+
+async def bot_api_call(method: str, payload: dict):
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _bot_api_call_sync, method, payload)
+    if not result.get("ok"):
+        raise RuntimeError(f"Bot API error in {method}: {result}")
+    return result.get("result")
+
+async def bot_api_send_text(chat_id, text):
+    return await bot_api_call("sendMessage", {
+        "chat_id": chat_id, "text": text, "parse_mode": "HTML"
+    })
+
+async def bot_api_copy_message(chat_id, from_chat_id, message_id, caption=None):
+    payload = {"chat_id": chat_id, "from_chat_id": from_chat_id, "message_id": message_id}
+    if caption is not None:
+        payload["caption"] = caption
+        payload["parse_mode"] = "HTML"
+    return await bot_api_call("copyMessage", payload)
+
+async def bot_api_send_media_group(chat_id, media_items):
+    return await bot_api_call("sendMediaGroup", {"chat_id": chat_id, "media": media_items})
 
 # 4. HELPERS
 def is_target_bot(msg) -> bool:
@@ -64,6 +110,20 @@ def clean_and_brand_text(text_html: str) -> str:
     if signature_parts: cleaned += "\n\n" + " / ".join(signature_parts)
     return cleaned
 
+def _build_media_item(msg, caption):
+    """Build a Bot API media-group item dict from a Pyrogram message."""
+    item = None
+    if msg.photo:
+        item = {"type": "photo", "media": msg.photo.file_id}
+    elif msg.video:
+        item = {"type": "video", "media": msg.video.file_id}
+    elif msg.document:
+        item = {"type": "document", "media": msg.document.file_id}
+    if item is not None and caption:
+        item["caption"] = caption
+        item["parse_mode"] = "HTML"
+    return item
+
 async def _get_group_lock(group_id):
     """Lazily create (once) a lock dedicated to this media_group_id."""
     async with BOT_INBOX_LOCKS_GUARD:
@@ -75,24 +135,21 @@ async def _get_group_lock(group_id):
 async def process_bot_album(group_id):
     """
     Debounced flush: waits until ALBUM_DEBOUNCE_SECONDS has passed since the
-    LAST piece of this group arrived (not a fixed one-shot sleep), then sends
-    the whole album. Only one instance of this ever runs per group_id because
-    it's only spawned once, under the per-group lock, in bot_inbox_handler.
+    LAST piece of this group arrived, then sends the whole album via the raw
+    Bot API (HTTPS) — no Pyrogram MTProto peer resolution needed for the
+    destination chat. Only one instance of this ever runs per group_id.
     """
     lock = await _get_group_lock(group_id)
     try:
-        # Keep waiting as long as new pieces keep arriving.
         while True:
             await asyncio.sleep(ALBUM_DEBOUNCE_SECONDS)
             async with lock:
                 bucket = BOT_INBOX_ALBUMS.get(group_id)
                 if bucket is None:
-                    return  # already flushed by someone else / nothing to do
+                    return
                 if bucket.get("dirty"):
-                    # a new message arrived while we were sleeping — wait again
                     bucket["dirty"] = False
                     continue
-                # No new arrivals during the debounce window -> flush now.
                 messages = bucket["messages"]
                 del BOT_INBOX_ALBUMS[group_id]
                 break
@@ -113,30 +170,26 @@ async def process_bot_album(group_id):
                 caption = clean_and_brand_text(raw_caption) if raw_caption else clean_and_brand_text(" ")
                 has_set_caption = True
 
-            if msg.photo:
-                media_list.append(InputMediaPhoto(media=msg.photo.file_id, caption=caption, parse_mode=enums.ParseMode.HTML))
-            elif msg.video:
-                media_list.append(InputMediaVideo(media=msg.video.file_id, caption=caption, parse_mode=enums.ParseMode.HTML))
-            elif msg.document:
-                media_list.append(InputMediaDocument(media=msg.document.file_id, caption=caption, parse_mode=enums.ParseMode.HTML))
-            # anything else (audio/voice/sticker) can't be grouped — skip it,
-            # but don't let it silently swallow the whole album.
+            item = _build_media_item(msg, caption)
+            if item:
+                media_list.append(item)
+            # anything else (audio/voice/sticker) can't be grouped — skipped,
+            # but doesn't swallow the rest of the album.
 
         if not media_list:
             print(f"⚠️ Album {group_id}: no groupable media found, nothing sent.")
         elif len(media_list) == 1:
             # Telegram rejects media groups with a single item — send it plainly.
             single = messages[0]
-            await bot_app.copy_message(
+            await bot_api_copy_message(
                 chat_id=DESTINATION_CHAT_ID,
                 from_chat_id=single.chat.id,
                 message_id=single.id,
-                caption=media_list[0].caption,
-                parse_mode=enums.ParseMode.HTML,
+                caption=media_list[0].get("caption"),
             )
             print("✅ SUCCESS: Bot relayed single leftover item to destination!")
         else:
-            await bot_app.send_media_group(DESTINATION_CHAT_ID, media_list)
+            await bot_api_send_media_group(DESTINATION_CHAT_ID, media_list)
             print("✅ SUCCESS: Bot relayed ALBUM to destination!")
 
         for msg in messages:
@@ -147,7 +200,6 @@ async def process_bot_album(group_id):
 
     except Exception:
         print(f"❌ CRITICAL ERROR IN ALBUM TASK for group {group_id}:\n{traceback.format_exc()}")
-        # make sure we don't leave a stuck entry behind
         BOT_INBOX_ALBUMS.pop(group_id, None)
     finally:
         BOT_INBOX_LOCKS.pop(group_id, None)
@@ -155,15 +207,6 @@ async def process_bot_album(group_id):
 @bot_app.on_message(filters.private)
 async def bot_inbox_handler(client, message):
     try:
-        # Ignore/clean up the one-off "priming" forward used at startup to
-        # cache the bot's peer for the destination chat — never relay it.
-        if message.forward_from_chat and message.forward_from_chat.id == DESTINATION_CHAT_ID:
-            try:
-                await message.delete()
-            except Exception:
-                pass
-            return
-
         if not message.media:
             return
 
@@ -175,16 +218,21 @@ async def bot_inbox_handler(client, message):
                 if bucket is None:
                     bucket = {"messages": [], "dirty": False}
                     BOT_INBOX_ALBUMS[group_id] = bucket
-                    # Spawn the flush task exactly once per group, atomically
-                    # with creating the bucket, so there's no window where
-                    # two tasks can be created for the same album.
                     asyncio.create_task(process_bot_album(group_id))
                 else:
-                    bucket["dirty"] = True  # tell the flush loop to keep waiting
+                    bucket["dirty"] = True
                 bucket["messages"].append(message)
             return
 
-        await message.copy(chat_id=DESTINATION_CHAT_ID)
+        # Single media item — relay via raw Bot API, then clean up the inbox copy.
+        caption_source = message.caption.html if message.caption else ""
+        caption = clean_and_brand_text(caption_source) if caption_source else None
+        await bot_api_copy_message(
+            chat_id=DESTINATION_CHAT_ID,
+            from_chat_id=message.chat.id,
+            message_id=message.id,
+            caption=caption,
+        )
         await message.delete()
     except Exception:
         print(f"❌ ERROR in bot_inbox_handler:\n{traceback.format_exc()}")
@@ -213,7 +261,10 @@ async def process_and_send_message(message):
 
     if message.text:
         new_text = clean_and_brand_text(message.text.html)
-        await bot_app.send_message(chat_id=DESTINATION_CHAT_ID, text=new_text, parse_mode=enums.ParseMode.HTML)
+        try:
+            await bot_api_send_text(DESTINATION_CHAT_ID, new_text)
+        except Exception:
+            print(f"❌ Error sending text to destination via Bot API:\n{traceback.format_exc()}")
     elif message.media:
         caption_source = message.caption.html if message.caption else ""
         new_caption = clean_and_brand_text(caption_source) if caption_source else clean_and_brand_text(" ")
@@ -245,11 +296,6 @@ async def main():
     except Exception as e:
         print(f"⚠️ Initialization note: {e}")
 
-    # IMPORTANT: sync the userbot's own dialog list FIRST. Pyrogram only caches
-    # peer access_hashes for chats it has actually seen — a fresh/short-lived
-    # session may not have DESTINATION_CHAT_ID cached yet even if the account
-    # is genuinely a member. get_dialogs() forces a full sync of every chat
-    # the userbot is in, which populates that cache.
     try:
         dialog_count = 0
         async for dialog in user_app.get_dialogs(limit=200):
@@ -258,57 +304,14 @@ async def main():
     except Exception:
         print(f"⚠️ Dialog sync failed:\n{traceback.format_exc()}")
 
-    # Make sure the USERBOT itself can resolve the destination chat first —
-    # export_chat_invite_link below depends on this working.
+    # Quick sanity check only — no longer required for anything to work,
+    # since destination sends now go through the raw Bot API (HTTPS), which
+    # needs no local peer cache at all.
     try:
-        await user_app.get_chat(DESTINATION_CHAT_ID)
-    except Exception:
-        print(f"⚠️ Userbot still can't see destination chat after dialog sync. "
-              f"Double-check the userbot account is actually a member of {DESTINATION_CHAT_ID}.")
-
-    # Make sure the BOT has a cached peer (access_hash) for the destination chat.
-    # Bots can't resolve a raw numeric chat ID until they've seen a full Chat
-    # object for it at least once. Preferred method: a real invite link for the
-    # chat (set DESTINATION_INVITE_LINK) — this works for admins/members
-    # without needing special export permissions. Fallback: forward-priming.
-    try:
-        await bot_app.get_chat(DESTINATION_CHAT_ID)
-        print("✅ Bot already has destination chat cached.")
-    except Exception:
-        resolved = False
-
-        if DESTINATION_INVITE_LINK:
-            print("⚠️ Bot has no cached peer for destination chat — resolving via provided invite link...")
-            try:
-                chat = await bot_app.get_chat(DESTINATION_INVITE_LINK)
-                print(f"✅ Peer cached for bot via invite link: {chat.id}")
-                resolved = True
-            except Exception as e:
-                print(f"❌ Invite link resolution failed: {e}")
-        else:
-            print("ℹ️ No DESTINATION_INVITE_LINK set — skipping invite-link resolution.")
-
-        if not resolved:
-            print("⚠️ Falling back to forward-priming...")
-            try:
-                history = []
-                async for m in user_app.get_chat_history(DESTINATION_CHAT_ID, limit=1):
-                    history.append(m)
-                if not history:
-                    print("❌ Destination chat has no messages to forward for priming.")
-                else:
-                    await user_app.forward_messages(BOT_PEER_ID, DESTINATION_CHAT_ID, history[0].id)
-                    await asyncio.sleep(2.0)
-                    resolved_chat = await bot_app.get_chat(DESTINATION_CHAT_ID)
-                    print(f"✅ Peer cached for bot via forward: {resolved_chat.id}")
-                    resolved = True
-            except Exception as inner_e:
-                print(f"❌ Forward-priming also failed: {inner_e}")
-
-        if not resolved:
-            print("❌❌❌ COULD NOT RESOLVE DESTINATION PEER BY ANY METHOD. "
-                  "Set DESTINATION_INVITE_LINK to a real invite link for this chat "
-                  "(get it from the Telegram app: group info → Invite Link) and redeploy.")
+        info = await bot_api_call("getChat", {"chat_id": DESTINATION_CHAT_ID})
+        print(f"✅ Bot API confirms access to destination chat: {info.get('title', info.get('id'))}")
+    except Exception as e:
+        print(f"⚠️ Bot API getChat check failed (bot may not actually be a member/admin there): {e}")
 
     try:
         async for msg in user_app.get_chat_history(SOURCE_GROUP_ID, limit=50):
