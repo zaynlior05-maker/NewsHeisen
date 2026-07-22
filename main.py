@@ -31,7 +31,7 @@ BOT_INBOX_LOCKS = {}           # group_id -> asyncio.Lock (per-group lock)
 BOT_INBOX_LOCKS_GUARD = asyncio.Lock()  # protects creation of the per-group lock itself
 
 EXCLUDED_PHRASES = ["( PAID AD )", "The giveaway has officially ended.", "Giveaway Entries"]
-SCRIPT_VERSION = "relay-v7-catchup-group-and-channel-2026-07-22"
+SCRIPT_VERSION = "relay-v8-full-tracing-2026-07-22"
 
 # How long to wait after the LAST piece of an album arrives before flushing it.
 ALBUM_DEBOUNCE_SECONDS = 2.5
@@ -207,7 +207,11 @@ async def process_bot_album(group_id):
 @bot_app.on_message(filters.private)
 async def bot_inbox_handler(client, message):
     try:
+        print(f"📥 Bot inbox received message #{message.id} "
+              f"(media_group_id={message.media_group_id}, has_media={bool(message.media)}) from chat {message.chat.id}")
+
         if not message.media:
+            print(f"ℹ️ Message #{message.id} has no media — ignoring.")
             return
 
         if message.media_group_id:
@@ -233,6 +237,7 @@ async def bot_inbox_handler(client, message):
             message_id=message.id,
             caption=caption,
         )
+        print(f"✅ SUCCESS: Bot relayed single media #{message.id} to destination!")
         await message.delete()
     except Exception:
         print(f"❌ ERROR in bot_inbox_handler:\n{traceback.format_exc()}")
