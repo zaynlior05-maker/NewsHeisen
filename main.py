@@ -7,6 +7,7 @@ import urllib.request
 import urllib.error
 from pyrogram import Client, filters, enums, idle
 from pyrogram.types import InputMediaPhoto, InputMediaVideo, InputMediaDocument
+from pyrogram.errors import FloodWait
 
 # 1. CREDENTIALS & CHAT IDs
 API_ID = int(os.environ["API_ID"])
@@ -37,8 +38,16 @@ SCRIPT_VERSION = "relay-v8-full-tracing-2026-07-22"
 ALBUM_DEBOUNCE_SECONDS = 2.5
 
 # 3. CLIENTS
-user_app = Client("user_account", session_string=SESSION_STRING, api_id=API_ID, api_hash=API_HASH)
-bot_app = Client("my_bot", bot_token=MY_BOT_TOKEN, api_id=API_ID, api_hash=API_HASH)
+# workdir points at a persistent volume (mount one in Railway: Settings ->
+# Volumes -> mount path /app/sessions) so the .session files survive restarts.
+# Without this, every redeploy forces a brand-new bot login, and enough of
+# those in a row triggers Telegram's FloodWait on auth.ImportBotAuthorization
+# (exactly what just happened).
+SESSION_DIR = os.environ.get("SESSION_DIR", "/app/sessions")
+os.makedirs(SESSION_DIR, exist_ok=True)
+
+user_app = Client("user_account", session_string=SESSION_STRING, api_id=API_ID, api_hash=API_HASH, workdir=SESSION_DIR)
+bot_app = Client("my_bot", bot_token=MY_BOT_TOKEN, api_id=API_ID, api_hash=API_HASH, workdir=SESSION_DIR)
 
 # 3b. RAW BOT API (HTTPS) — used ONLY for sending to DESTINATION_CHAT_ID.
 # This completely bypasses Pyrogram's MTProto peer-cache requirement, because
@@ -293,12 +302,31 @@ async def monitor_and_forward(client, message):
             return
     await process_and_send_message(message)
 
+async def _start_with_flood_wait_retry(client, label):
+    """
+    Start a Pyrogram client, and if Telegram returns a FloodWait, sleep the
+    required duration INSIDE this same running process and retry — rather
+    than crashing (which lets Railway restart the container and fire off yet
+    another login attempt mid-wait, needlessly repeating/risking extending
+    the block). The container stays "up" the whole time from Railway's POV.
+    """
+    while True:
+        try:
+            await client.start()
+            print(f"✅ {label} started successfully.")
+            return
+        except FloodWait as e:
+            wait_s = int(getattr(e, "value", 60))
+            print(f"⏳ {label}: FloodWait — sleeping {wait_s + 10}s before retrying login "
+                  f"(container staying alive, NOT crashing/restarting)...")
+            await asyncio.sleep(wait_s + 10)
+
 # 7. STARTUP & CACHE WARMUP
 async def main():
     global BOT_PEER_ID
     print(f"🚀 SCRIPT VERSION: {SCRIPT_VERSION}")
-    await user_app.start()
-    await bot_app.start()
+    await _start_with_flood_wait_retry(user_app, "Userbot")
+    await _start_with_flood_wait_retry(bot_app, "Bot")
 
     bot_info = await bot_app.get_me()
     try:
@@ -371,4 +399,15 @@ async def main():
     await bot_app.stop()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        # If this is a FloodWait, surface it clearly and exit without a raw
+        # traceback — a crash-restart loop on Railway would only make the
+        # flood-wait timer worse by triggering more login attempts.
+        wait_seconds = getattr(e, "value", None)
+        if type(e).__name__ == "FloodWait" and wait_seconds:
+            print(f"⏳ FLOOD WAIT: Telegram requires waiting {wait_seconds} seconds before the next login attempt. "
+                  f"Do NOT redeploy until this window passes, or the wait may reset/extend.")
+        else:
+            print(f"❌ FATAL STARTUP ERROR:\n{traceback.format_exc()}")
