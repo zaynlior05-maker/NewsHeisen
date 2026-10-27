@@ -24,7 +24,7 @@ MY_ADMIN = os.environ.get("MY_ADMIN", "")
 
 # 2. GLOBALS
 EXCLUDED_PHRASES = ["( PAID AD )", "The giveaway has officially ended.", "Giveaway Entries"]
-SCRIPT_VERSION = "relay-v14-inmemory-fix-2026-10-27"
+SCRIPT_VERSION = "relay-v15-chatid-integer-fix-2026-10-27"
 
 SESSION_DIR = os.environ.get("SESSION_DIR", "/app/sessions")
 os.makedirs(SESSION_DIR, exist_ok=True)
@@ -68,8 +68,6 @@ BACKFILL_SCAN_LIMIT = 300
 PERIODIC_SWEEP_SECONDS = 180
 
 # 3. CLIENTS
-# FIXED: Added in_memory=True so Pyrogram completely bypasses loading/unpacking
-# any corrupt session file buffers from the mounted storage volume.
 user_app = Client(
     "user_account",
     session_string=SESSION_STRING,
@@ -142,7 +140,10 @@ def _bot_api_multipart_sync(method: str, fields: dict, files: list):
     resp = conn.getresponse()
     raw = resp.read().decode("utf-8")
     conn.close()
-    result = json.loads(raw)
+    try:
+        result = json.loads(raw)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to parse Telegram API JSON response: {raw}") from exc
     if not result.get("ok"):
         raise RuntimeError(f"Bot API multipart error in {method}: {result}")
     return result.get("result")
@@ -228,7 +229,8 @@ async def send_single_media_direct(msg, caption: str | None):
         print(f"⚠️ Could not download media for msg #{msg.id} — skipping.")
         return
 
-    fields = {"chat_id": str(DESTINATION_CHAT_ID)}
+    # FIXED: chat_id must be passed as an integer to prevent Telegram API rejections
+    fields = {"chat_id": DESTINATION_CHAT_ID}
     if caption:
         fields["caption"] = caption
         fields["parse_mode"] = "HTML"
@@ -278,7 +280,8 @@ async def send_album_direct(messages: list, caption: str | None):
             upload_files[0][1],
             upload_files[0][3],
         )
-        fields = {"chat_id": str(DESTINATION_CHAT_ID)}
+        # FIXED: chat_id must be an integer
+        fields = {"chat_id": DESTINATION_CHAT_ID}
         if caption:
             fields["caption"] = caption
             fields["parse_mode"] = "HTML"
@@ -287,7 +290,7 @@ async def send_album_direct(messages: list, caption: str | None):
         return
 
     fields = {
-        "chat_id": str(DESTINATION_CHAT_ID),
+        "chat_id": DESTINATION_CHAT_ID,
         "media": json.dumps(media_json_items),
     }
     await bot_api_multipart("sendMediaGroup", fields, upload_files)
