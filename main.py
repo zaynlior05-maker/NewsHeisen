@@ -24,7 +24,7 @@ MY_ADMIN = os.environ.get("MY_ADMIN", "")
 
 # 2. GLOBALS
 EXCLUDED_PHRASES = ["( PAID AD )", "The giveaway has officially ended.", "Giveaway Entries"]
-SCRIPT_VERSION = "relay-v12-direct-upload-2026-08-14"
+SCRIPT_VERSION = "relay-v14-inmemory-fix-2026-10-27"
 
 SESSION_DIR = os.environ.get("SESSION_DIR", "/app/sessions")
 os.makedirs(SESSION_DIR, exist_ok=True)
@@ -68,14 +68,15 @@ BACKFILL_SCAN_LIMIT = 300
 PERIODIC_SWEEP_SECONDS = 180
 
 # 3. CLIENTS
+# FIXED: Added in_memory=True so Pyrogram completely bypasses loading/unpacking
+# any corrupt session file buffers from the mounted storage volume.
 user_app = Client(
     "user_account",
     session_string=SESSION_STRING,
     api_id=API_ID,
     api_hash=API_HASH,
-    workdir=SESSION_DIR,
+    in_memory=True,
 )
-# Bot client is kept for auth/startup; media is sent via HTTP Bot API (multipart).
 bot_app = Client(
     "my_bot",
     bot_token=MY_BOT_TOKEN,
@@ -117,11 +118,6 @@ async def bot_api_send_text(chat_id, text):
 
 # 3c. MULTIPART UPLOAD via http.client
 def _multipart_body(fields: dict, files: list) -> tuple:
-    """
-    fields: {name: str_value}
-    files:  [(field_name, filename, bytes_data, content_type), ...]
-    Returns (body_bytes, content_type_header).
-    """
     boundary = "Boundary" + os.urandom(12).hex()
     parts = []
     for name, value in fields.items():
@@ -180,10 +176,6 @@ def clean_and_brand_text(text_html: str) -> str:
     return cleaned
 
 def _media_info(msg):
-    """
-    Return (method, field_name, filename, content_type) for a Pyrogram message,
-    or None if the message has no supported media.
-    """
     if msg.photo:
         return ("sendPhoto", "photo", "photo.jpg", "image/jpeg")
     if msg.video:
@@ -206,7 +198,6 @@ def _media_info(msg):
     return None
 
 def _album_media_type(msg):
-    """Return the Bot API media type string for media-group items."""
     if msg.photo: return "photo"
     if msg.video: return "video"
     if msg.document: return "document"
@@ -214,7 +205,6 @@ def _album_media_type(msg):
     return None
 
 async def _download_msg_bytes(msg) -> bytes | None:
-    """Download a Pyrogram message's media into memory and return raw bytes."""
     try:
         buf = await user_app.download_media(msg, in_memory=True)
         if buf is None:
@@ -225,13 +215,8 @@ async def _download_msg_bytes(msg) -> bytes | None:
         print(f"❌ Failed to download media for msg #{msg.id}:\n{traceback.format_exc()}")
         return None
 
-# 5. DIRECT MEDIA SEND (no bot-inbox hop)
+# 5. DIRECT MEDIA SEND
 async def send_single_media_direct(msg, caption: str | None):
-    """
-    Download msg's media via userbot and upload directly to DESTINATION_CHAT_ID
-    using the Bot HTTP API (multipart). Eliminates the unreliable two-hop
-    bot-inbox relay.
-    """
     info = _media_info(msg)
     if info is None:
         print(f"⚠️ msg #{msg.id} has no supported media type — skipping.")
@@ -252,11 +237,6 @@ async def send_single_media_direct(msg, caption: str | None):
     print(f"✅ SUCCESS: Media #{msg.id} sent directly to destination via upload!")
 
 async def send_album_direct(messages: list, caption: str | None):
-    """
-    Download every media item in the album and send as a media group to
-    DESTINATION_CHAT_ID using the Bot HTTP API (multipart).
-    Falls back to single-item send if only one item is groupable.
-    """
     messages.sort(key=lambda m: m.id)
     media_json_items = []
     upload_files = []
@@ -292,7 +272,6 @@ async def send_album_direct(messages: list, caption: str | None):
         return
 
     if len(media_json_items) == 1:
-        # Bot API rejects media groups with a single item — send it plainly.
         method, field_name, filename, ctype = (
             f"send{media_json_items[0]['type'].capitalize()}",
             media_json_items[0]["type"],
@@ -331,7 +310,6 @@ async def process_and_send_message(message):
                         print(f"🚫 Album {message.media_group_id} excluded by phrase filter.")
                         return
 
-                # Build the caption from the first message that has one.
                 raw_caption = ""
                 for g_msg in sorted(group_msgs, key=lambda m: m.id):
                     if g_msg.caption:
@@ -358,7 +336,6 @@ async def process_and_send_message(message):
                 print(f"❌ Error sending text #{message.id}:\n{traceback.format_exc()}")
         elif message.media:
             caption_source = message.caption.html if message.caption else ""
-            # Always inject the signature, even when the original has no caption.
             new_caption = clean_and_brand_text(caption_source) if caption_source else clean_and_brand_text(" ")
             try:
                 await send_single_media_direct(message, new_caption)
