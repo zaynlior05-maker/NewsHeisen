@@ -13,7 +13,10 @@ from pyrogram.errors import FloodWait
 # 1. CREDENTIALS & CHAT IDs
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
-SESSION_STRING = os.environ["SESSION_STRING"]
+SESSION_STRING = os.environ.get("SESSION_STRING", "").strip()
+if not SESSION_STRING:
+    raise ValueError("❌ CRITICAL ERROR: SESSION_STRING environment variable is missing or empty in Railway!")
+
 MY_BOT_TOKEN = os.environ["MY_BOT_TOKEN"]
 SOURCE_CHANNEL_ID = int(os.environ["SOURCE_CHANNEL_ID"])
 SOURCE_GROUP_ID = int(os.environ["SOURCE_GROUP_ID"])
@@ -24,7 +27,7 @@ MY_ADMIN = os.environ.get("MY_ADMIN", "")
 
 # 2. GLOBALS
 EXCLUDED_PHRASES = ["( PAID AD )", "The giveaway has officially ended.", "Giveaway Entries"]
-SCRIPT_VERSION = "relay-v16-startup-confirmation-2026-10-27"
+SCRIPT_VERSION = "relay-v17-session-validation-2026-10-27"
 
 SESSION_DIR = os.environ.get("SESSION_DIR", "/app/sessions")
 os.makedirs(SESSION_DIR, exist_ok=True)
@@ -416,7 +419,6 @@ async def _start_with_flood_wait_retry(client, label):
             await asyncio.sleep(wait_s + 10)
 
 async def send_last_message_startup_test():
-    """Fetches the absolute latest message from the source channel/group and posts it immediately to confirm live functionality."""
     print("🧪 STARTUP TEST: Fetching the most recent source post to confirm live routing...")
     target_msg = None
     try:
@@ -462,7 +464,6 @@ async def main():
     except Exception as e:
         print(f"⚠️ Bot API getChat check failed (bot may not be a member/admin there): {e}")
 
-    # Immediate Live Confirmation Test on Startup
     await send_last_message_startup_test()
 
     if _IS_FIRST_RUN:
