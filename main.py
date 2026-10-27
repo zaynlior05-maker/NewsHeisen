@@ -14,11 +14,12 @@ from pyrogram.errors import FloodWait
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 
-# Explicit check and strip for Railway environment variable string
-SESSION_STRING = os.environ.get("SESSION_STRING", "").strip()
-print(f"🔍 DEBUG: Length of loaded SESSION_STRING is: {len(SESSION_STRING)}")
-if not SESSION_STRING or len(SESSION_STRING) < 100:
-    raise ValueError(f"❌ CRITICAL ERROR: SESSION_STRING is missing, empty, or truncated! Length found: {len(SESSION_STRING)}")
+# Strip all hidden spaces, newlines, quotes, or carriage returns from the string
+SESSION_STRING = os.environ.get("SESSION_STRING", "").strip().strip('"').strip("'").replace("\n", "").replace("\r", "")
+print(f"🔍 DEBUG: Cleaned SESSION_STRING length is: {len(SESSION_STRING)}")
+
+if not SESSION_STRING or len(SESSION_STRING) < 300:
+    raise ValueError(f"❌ CRITICAL ERROR: SESSION_STRING is invalid or truncated! Length found: {len(SESSION_STRING)}")
 
 MY_BOT_TOKEN = os.environ["MY_BOT_TOKEN"]
 SOURCE_CHANNEL_ID = int(os.environ["SOURCE_CHANNEL_ID"])
@@ -30,7 +31,7 @@ MY_ADMIN = os.environ.get("MY_ADMIN", "")
 
 # 2. GLOBALS
 EXCLUDED_PHRASES = ["( PAID AD )", "The giveaway has officially ended.", "Giveaway Entries"]
-SCRIPT_VERSION = "relay-v19-debug-session-length-2026-10-27"
+SCRIPT_VERSION = "relay-v20-cleaned-session-string-2026-10-27"
 
 SESSION_DIR = os.environ.get("SESSION_DIR", "/app/sessions")
 os.makedirs(SESSION_DIR, exist_ok=True)
