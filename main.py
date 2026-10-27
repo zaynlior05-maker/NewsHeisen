@@ -13,9 +13,12 @@ from pyrogram.errors import FloodWait
 # 1. CREDENTIALS & CHAT IDs
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
+
+# Explicit check and strip for Railway environment variable string
 SESSION_STRING = os.environ.get("SESSION_STRING", "").strip()
-if not SESSION_STRING:
-    raise ValueError("❌ CRITICAL ERROR: SESSION_STRING environment variable is missing or empty in Railway!")
+print(f"🔍 DEBUG: Length of loaded SESSION_STRING is: {len(SESSION_STRING)}")
+if not SESSION_STRING or len(SESSION_STRING) < 100:
+    raise ValueError(f"❌ CRITICAL ERROR: SESSION_STRING is missing, empty, or truncated! Length found: {len(SESSION_STRING)}")
 
 MY_BOT_TOKEN = os.environ["MY_BOT_TOKEN"]
 SOURCE_CHANNEL_ID = int(os.environ["SOURCE_CHANNEL_ID"])
@@ -27,7 +30,7 @@ MY_ADMIN = os.environ.get("MY_ADMIN", "")
 
 # 2. GLOBALS
 EXCLUDED_PHRASES = ["( PAID AD )", "The giveaway has officially ended.", "Giveaway Entries"]
-SCRIPT_VERSION = "relay-v18-pure-memory-userapp-2026-10-27"
+SCRIPT_VERSION = "relay-v19-debug-session-length-2026-10-27"
 
 SESSION_DIR = os.environ.get("SESSION_DIR", "/app/sessions")
 os.makedirs(SESSION_DIR, exist_ok=True)
@@ -71,7 +74,6 @@ BACKFILL_SCAN_LIMIT = 300
 PERIODIC_SWEEP_SECONDS = 180
 
 # 3. CLIENTS
-# FIXED: user_app uses pure string session in memory without any workdir/disk attachment
 user_app = Client(
     "user_account",
     session_string=SESSION_STRING,
