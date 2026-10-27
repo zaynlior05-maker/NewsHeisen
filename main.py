@@ -27,7 +27,7 @@ MY_ADMIN = os.environ.get("MY_ADMIN", "")
 
 # 2. GLOBALS
 EXCLUDED_PHRASES = ["( PAID AD )", "The giveaway has officially ended.", "Giveaway Entries"]
-SCRIPT_VERSION = "relay-v17-session-validation-2026-10-27"
+SCRIPT_VERSION = "relay-v18-pure-memory-userapp-2026-10-27"
 
 SESSION_DIR = os.environ.get("SESSION_DIR", "/app/sessions")
 os.makedirs(SESSION_DIR, exist_ok=True)
@@ -71,13 +71,15 @@ BACKFILL_SCAN_LIMIT = 300
 PERIODIC_SWEEP_SECONDS = 180
 
 # 3. CLIENTS
+# FIXED: user_app uses pure string session in memory without any workdir/disk attachment
 user_app = Client(
     "user_account",
     session_string=SESSION_STRING,
     api_id=API_ID,
     api_hash=API_HASH,
-    in_memory=True,
+    in_memory=True
 )
+
 bot_app = Client(
     "my_bot",
     bot_token=MY_BOT_TOKEN,
