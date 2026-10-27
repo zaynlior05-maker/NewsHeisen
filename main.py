@@ -24,7 +24,7 @@ MY_ADMIN = os.environ.get("MY_ADMIN", "")
 
 # 2. GLOBALS
 EXCLUDED_PHRASES = ["( PAID AD )", "The giveaway has officially ended.", "Giveaway Entries"]
-SCRIPT_VERSION = "relay-v15-chatid-integer-fix-2026-10-27"
+SCRIPT_VERSION = "relay-v16-startup-confirmation-2026-10-27"
 
 SESSION_DIR = os.environ.get("SESSION_DIR", "/app/sessions")
 os.makedirs(SESSION_DIR, exist_ok=True)
@@ -111,7 +111,7 @@ async def bot_api_call(method: str, payload: dict):
 
 async def bot_api_send_text(chat_id, text):
     return await bot_api_call("sendMessage", {
-        "chat_id": chat_id, "text": text, "parse_mode": "HTML"
+        "chat_id": int(chat_id), "text": text, "parse_mode": "HTML"
     })
 
 # 3c. MULTIPART UPLOAD via http.client
@@ -229,8 +229,7 @@ async def send_single_media_direct(msg, caption: str | None):
         print(f"⚠️ Could not download media for msg #{msg.id} — skipping.")
         return
 
-    # FIXED: chat_id must be passed as an integer to prevent Telegram API rejections
-    fields = {"chat_id": DESTINATION_CHAT_ID}
+    fields = {"chat_id": int(DESTINATION_CHAT_ID)}
     if caption:
         fields["caption"] = caption
         fields["parse_mode"] = "HTML"
@@ -280,8 +279,7 @@ async def send_album_direct(messages: list, caption: str | None):
             upload_files[0][1],
             upload_files[0][3],
         )
-        # FIXED: chat_id must be an integer
-        fields = {"chat_id": DESTINATION_CHAT_ID}
+        fields = {"chat_id": int(DESTINATION_CHAT_ID)}
         if caption:
             fields["caption"] = caption
             fields["parse_mode"] = "HTML"
@@ -290,7 +288,7 @@ async def send_album_direct(messages: list, caption: str | None):
         return
 
     fields = {
-        "chat_id": DESTINATION_CHAT_ID,
+        "chat_id": int(DESTINATION_CHAT_ID),
         "media": json.dumps(media_json_items),
     }
     await bot_api_multipart("sendMediaGroup", fields, upload_files)
@@ -417,6 +415,33 @@ async def _start_with_flood_wait_retry(client, label):
             )
             await asyncio.sleep(wait_s + 10)
 
+async def send_last_message_startup_test():
+    """Fetches the absolute latest message from the source channel/group and posts it immediately to confirm live functionality."""
+    print("🧪 STARTUP TEST: Fetching the most recent source post to confirm live routing...")
+    target_msg = None
+    try:
+        async for msg in user_app.get_chat_history(SOURCE_CHANNEL_ID, limit=1):
+            target_msg = msg
+            break
+    except Exception:
+        try:
+            async for msg in user_app.get_chat_history(SOURCE_GROUP_ID, limit=1):
+                if is_target_bot(msg):
+                    target_msg = msg
+                    break
+        except Exception:
+            pass
+
+    if target_msg:
+        print(f"🎯 Found live test message #{target_msg.id} — sending confirmation post to destination now...")
+        try:
+            await process_and_send_message(target_msg)
+            print("✨ Startup confirmation test completed successfully!")
+        except Exception as e:
+            print(f"❌ Startup test dispatch failed: {e}")
+    else:
+        print("⚠️ Startup test: No recent messages found to verify.")
+
 # 7. STARTUP
 async def main():
     print(f"🚀 SCRIPT VERSION: {SCRIPT_VERSION}")
@@ -432,10 +457,13 @@ async def main():
         print(f"⚠️ Dialog sync failed:\n{traceback.format_exc()}")
 
     try:
-        info = await bot_api_call("getChat", {"chat_id": DESTINATION_CHAT_ID})
+        info = await bot_api_call("getChat", {"chat_id": int(DESTINATION_CHAT_ID)})
         print(f"✅ Bot API confirms access to destination chat: {info.get('title', info.get('id'))}")
     except Exception as e:
         print(f"⚠️ Bot API getChat check failed (bot may not be a member/admin there): {e}")
+
+    # Immediate Live Confirmation Test on Startup
+    await send_last_message_startup_test()
 
     if _IS_FIRST_RUN:
         print("ℹ️ First-ever run detected (no persisted state) — recording a baseline, not resending old backlog.")
